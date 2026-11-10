@@ -1,0 +1,49 @@
+# EMT dataset sender on the vehicle Jetson (drift-vehicle). Same camera as
+# emt-sender-pod.yaml, but it targets the fixed virtual address 10.255.0.10,
+# which no host owns: a DNAT rule on the Nano (drift-yolo-target) sends it to
+# the local YOLO pod or, over 5G, to the Orin's floating IP, and DRIFT flips
+# that rule on each vehicle<->edge migration. The sender never changes.
+# Measured 2026-10-20, with YOLO on the Orin over 5G:
+#  * hostNetwork: in a pod (MTU 1240) every 1268-byte packet is fragmented, and
+#    fragments through the 5G core's NAT never made a complete frame (0 FPS).
+#    On the host (wwan0 MTU 1400) nothing fragments. The DNAT also hooks OUTPUT.
+#  * The dataset is pre-encoded to 1280x720 once (/srv/emt/images720, same
+#    bilinear + JPEG q85 as --resize 1280), so it is sent with --resize 0:
+#    re-encoding live on the Nano capped the sender at ~10 FPS.
+# Dataset on the node: /srv/emt/scene, a link to /srv/emt/scenes/day or /night
+# (drift-dashcam-scene day|night). day = video_122233 (highway, 12:24), night =
+# video_204647 (highway); 1800 frames each, pre-encoded by /srv/emt/bin/resize720.py.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: emt-sender
+  namespace: default
+spec:
+  hostNetwork: true
+  restartPolicy: Always
+  containers:
+  - name: sender
+    image: localhost/drift-emt-yolo:udp
+    imagePullPolicy: IfNotPresent
+    # drift_sender.py runs from the node (/srv/emt/bin) so it follows scene
+    # switches without an image rebuild; the sender never migrates.
+    command: ["python3", "/data/bin/drift_sender.py", "--image-dir", "/data/scene",
+              "--target-host", "10.255.0.10", "--target-port", "5005", "--loop", "--fps", "12",
+              "--resize", "640"]
+    env:
+    - { name: PYTHONPATH, value: /app }
+    # spread each frame's ~95 datagrams over 80% of the frame interval: a burst
+    # is dropped by the QoD policer (small bucket), cutting YOLO to ~7 FPS
+    - { name: PACE, value: "0.8" }
+    # 2026-10-31: 640 px (the model's input size, decoded live from the 720p set
+    # at reduced JPEG scale) and every datagram sent twice, ~7 Mbit/s. A QOS_L
+    # flow loses ~5% of datagrams: 720p frames arrived 69% whole under QoD,
+    # these 100% (docs: the QoD redundancy test, 2026-10-31).
+    - { name: DUP, value: "2" }
+    volumeMounts:
+    - { name: dataset, mountPath: /data, readOnly: true }
+    resources:
+      requests: { cpu: "100m", memory: "64Mi" }
+  volumes:
+  - name: dataset
+    hostPath: { path: /srv/emt, type: Directory }

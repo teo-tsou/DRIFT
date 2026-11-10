@@ -1,0 +1,18 @@
+# drift-burst-route: on the edge (Orin), the vehicle's checkpoint delta arrives
+# from and leaves to the 5G core's NAT address (10.220.2.50). A delta is one
+# ~2 MiB burst over a ~45 ms RTT, so start it with a 64-segment window instead
+# of slow-starting from 10. Same interface and path as the subnet route; only
+# the initial windows change.
+[Unit]
+Description=DRIFT: large initial TCP window towards the 5G core (checkpoint bursts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip route replace 10.220.2.50/32 dev end0 src 10.220.2.170 initcwnd 64 initrwnd 64
+ExecStop=/sbin/ip route del 10.220.2.50/32 dev end0
+
+[Install]
+WantedBy=multi-user.target

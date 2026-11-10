@@ -1,0 +1,28 @@
+#!/bin/bash
+# Idempotently create the EVPN stretched-L2 bridge + VXLAN device.
+# FRR (bgpd l2vpn evpn, advertise-all-vni) programs this VXLAN's FDB from
+# EVPN routes, so the bridge on both nodes becomes one L2 segment.
+set -e
+BR="{{ evpn_bridge }}"
+VX="{{ evpn_vxlan_dev }}"
+VNI="{{ evpn_vni }}"
+LOCAL="{{ ansible_host }}"
+PORT="{{ evpn_underlay_dstport }}"
+LMTU=$(( {{ evpn_overlay_mtu }} + 50 ))   # bridge/vxlan MTU (room for VXLAN header)
+
+# bridge
+ip link show "$BR" >/dev/null 2>&1 || ip link add "$BR" type bridge
+ip link set "$BR" mtu "$LMTU" 2>/dev/null || true
+ip link set "$BR" up
+
+# vxlan — EVPN mode: no remote/group, nolearning (FRR fills the FDB)
+if ! ip link show "$VX" >/dev/null 2>&1; then
+    ip link add "$VX" type vxlan id "$VNI" dstport "$PORT" local "$LOCAL" nolearning
+fi
+ip link set "$VX" master "$BR"
+ip link set "$VX" mtu "$LMTU" 2>/dev/null || true
+ip link set "$VX" up
+
+# EVPN dataplane knobs on the vxlan bridge port
+bridge link set dev "$VX" learning off 2>/dev/null || true
+bridge link set dev "$VX" neigh_suppress on 2>/dev/null || true

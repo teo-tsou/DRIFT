@@ -1,0 +1,201 @@
+---
+# On this K3s setup /etc/cni/net.d is the real CNI conf directory.
+# /var/lib/rancher/k3s/agent/etc/cni/net.d does NOT exist.
+# All Multus paths (hostPath, wait_for, kubeconfig) use /etc/cni/net.d.
+
+- name: Debug CNI directory state before Multus
+  shell:
+    cmd: |
+      echo "=== /etc/cni/net.d ==="
+      stat /etc/cni/net.d 2>&1 | head -5
+      readlink /etc/cni/net.d 2>/dev/null && echo "(is symlink)" || echo "(real dir or missing)"
+      ls /etc/cni/net.d/ 2>&1 | head -10
+      echo "=== /var/lib/rancher/k3s/agent/etc/cni/net.d ==="
+      stat /var/lib/rancher/k3s/agent/etc/cni/net.d 2>&1 | head -5
+      readlink /var/lib/rancher/k3s/agent/etc/cni/net.d 2>/dev/null && echo "(is symlink)" || echo "(real dir or missing)"
+      ls /var/lib/rancher/k3s/agent/etc/cni/net.d/ 2>&1 | head -10
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  register: cni_debug
+  changed_when: false
+  failed_when: false
+
+- name: Show CNI directory state
+  debug:
+    msg: "{{ cni_debug.stdout_lines }}"
+  run_once: true
+
+- name: Download Multus CNI thick-plugin DaemonSet manifest
+  # Thick plugin (multus-daemon) runs as a persistent process.
+  # Unlike the thin plugin, it does not exit after setup — the unix socket
+  # stays alive, so multus-shim can always reach the daemon.
+  get_url:
+    url: https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/v4.1.0/deployments/multus-daemonset-thick.yml
+    dest: /tmp/multus-daemonset.yml
+    mode: '0644'
+    force: true
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Wait for Kubernetes API server to be ready
+  shell:
+    cmd: kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get ns kube-system
+  register: api_check
+  until: api_check.rc == 0
+  retries: 30
+  delay: 10
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+
+- name: Ensure kube-ovn conflist exists before deploying Multus
+  # The thick daemon (multusConfigFile=auto) scans the conf dir on startup.
+  # If 01-kube-ovn.conflist is absent it exits without creating 00-multus.conf.
+  # We wait for the kube-ovn-cni pod to be Running first (its init container
+  # writes the conflist), then verify the file is in place.
+  shell:
+    cmd: |
+      TARGET="/etc/cni/net.d/01-kube-ovn.conflist"
+
+      # Check if conflist already present
+      if [ -f "$TARGET" ]; then
+        echo "conflist present at $TARGET"
+        exit 0
+      fi
+
+      # Wait up to 60s for kube-ovn-cni to be Running (its init writes the conflist)
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout status \
+        daemonset/kube-ovn-cni -n kube-system --timeout=60s 2>/dev/null || true
+
+      # Check again
+      if [ -f "$TARGET" ]; then
+        echo "conflist appeared after pod wait"
+        exit 0
+      fi
+
+      # Last resort: extract directly from the kube-ovn-cni pod
+      NODE=$(hostname)
+      POD=$(kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get pod -n kube-system \
+        -l app=kube-ovn-cni --field-selector "spec.nodeName=$NODE" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+      if [ -n "$POD" ]; then
+        kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml exec -n kube-system "$POD" \
+          -- cat /kube-ovn/01-kube-ovn.conflist 2>/dev/null > "$TARGET"
+        if [ -s "$TARGET" ]; then
+          echo "conflist extracted from pod $POD"
+          exit 0
+        fi
+        rm -f "$TARGET"
+      fi
+
+      echo "WARNING: 01-kube-ovn.conflist not found — Multus may fail to start"
+      exit 0
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  when: enable_kubeovn | default(false) | bool
+  changed_when: false
+  failed_when: false
+
+- name: Raise the Multus thick-daemon memory limit
+  # Upstream ships 50Mi. When KubeVirt, CDI and Longhorn all create pods at once,
+  # the burst of CNI ADDs gets the daemon OOM-killed, and every new pod on the
+  # node then hangs in ContainerCreating (seen on the Jetson AGX Orin).
+  replace:
+    path: /tmp/multus-daemonset.yml
+    regexp: 'memory: "50Mi"'
+    replace: 'memory: "{{ multus_memory | default("300Mi") }}"'
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Install multus-shim atomically (copy, then rename over the old one)
+  # Upstream's init container does a plain `cp` over /opt/cni/bin/multus-shim.
+  # After a reboot the runtime already runs that shim for pending pods, so the
+  # cp fails with "Text file busy", the init container crash-loops, and no pod
+  # on the node gets a network (seen on the Jetson AGX Orin after a reboot).
+  # A rename replaces the file even while the old shim is executing.
+  replace:
+    path: /tmp/multus-daemonset.yml
+    regexp: '(\s+)command:\n\s+- "cp"\n\s+- "/usr/src/multus-cni/bin/multus-shim"\n\s+- "/host/opt/cni/bin/multus-shim"'
+    replace: >-
+      \1command: ["/bin/sh", "-c", "cp /usr/src/multus-cni/bin/multus-shim /host/opt/cni/bin/multus-shim.new
+      && mv -f /host/opt/cni/bin/multus-shim.new /host/opt/cni/bin/multus-shim"]
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Apply Multus CNI DaemonSet
+  shell:
+    cmd: kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f /tmp/multus-daemonset.yml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Wait for Multus DaemonSet rollout
+  shell:
+    cmd: |
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout status \
+        daemonset/kube-multus-ds -n kube-system --timeout=180s
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+
+- name: Wait for 00-multus.conf to be created
+  wait_for:
+    path: /etc/cni/net.d/00-multus.conf
+    timeout: 90
+    sleep: 3
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  ignore_errors: true
+
+- name: Check if Multus daemon has TLS errors (only restart if needed)
+  shell:
+    cmd: |
+      # Give the daemon a moment to log any TLS errors
+      sleep 5
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml logs \
+        -n kube-system -l app=multus --tail=30 2>/dev/null \
+        | grep -cE 'x509|certificate|tls|TLS' || echo 0
+  register: multus_tls_errors
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+  failed_when: false
+
+- name: Patch Multus kubeconfig to skip TLS verification (only if TLS errors detected)
+  shell:
+    cmd: |
+      KUBECONFIG="/etc/cni/net.d/multus.d/multus.kubeconfig"
+      if [ -f "$KUBECONFIG" ]; then
+        cp "$KUBECONFIG" "${KUBECONFIG}.backup" 2>/dev/null || true
+        sed -i '/certificate-authority-data:/d' "$KUBECONFIG"
+        if ! grep -q 'insecure-skip-tls-verify' "$KUBECONFIG"; then
+          sed -i '/server:/ a\    insecure-skip-tls-verify: true' "$KUBECONFIG"
+        fi
+        echo "Patched $KUBECONFIG"
+      else
+        echo "Kubeconfig not found, skipping"
+      fi
+  loop: "{{ groups['all'] }}"
+  delegate_to: "{{ item }}"
+  become: true
+  ignore_errors: true
+  when: multus_tls_errors.stdout | trim | int > 0
+
+- name: Restart Multus DaemonSet (only if TLS patch was applied)
+  shell:
+    cmd: |
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout restart \
+        daemonset/kube-multus-ds -n kube-system
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+  when: multus_tls_errors.stdout | trim | int > 0
+
+- name: Wait for Multus DaemonSet rollout after restart (images already cached — fast)
+  shell:
+    cmd: |
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml rollout status \
+        daemonset/kube-multus-ds -n kube-system --timeout=90s
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+  when: multus_tls_errors.stdout | trim | int > 0

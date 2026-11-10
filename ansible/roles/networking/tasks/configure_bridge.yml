@@ -1,0 +1,46 @@
+---
+- name: Create bridge interfaces for all mapped networks
+  shell: |
+    if ! ip link show {{ item.bridge_name }} >/dev/null 2>&1; then
+      ip link add name {{ item.bridge_name }} type bridge
+      echo "Bridge {{ item.bridge_name }} created"
+    else
+      echo "Bridge {{ item.bridge_name }} already exists"
+    fi
+  register: bridge_result
+  changed_when: "'created' in bridge_result.stdout"
+  loop: "{{ node_bridge_configs }}"
+  when: node_bridge_configs is defined
+
+- name: Add VLAN interfaces to bridges
+  shell: |
+    master=$(ip link show {{ item.interface }}.{{ item.vlan_id }} | grep -o 'master [^ ]*' | awk '{print $2}')
+    if [ "$master" != "{{ item.bridge_name }}" ]; then
+      ip link set {{ item.interface }}.{{ item.vlan_id }} master {{ item.bridge_name }}
+      echo "Interface added to bridge"
+    else
+      echo "Interface already in bridge"
+    fi
+  register: addif_result
+  changed_when: "'Interface added' in addif_result.stdout"
+  loop: "{{ node_bridge_configs }}"
+  when: node_bridge_configs is defined
+
+- name: Bring up bridge interfaces
+  shell: ip link set {{ item.bridge_name }} up
+  changed_when: false
+  loop: "{{ node_bridge_configs }}"
+  when: node_bridge_configs is defined
+
+- name: Verify bridge configurations
+  shell: ip link show {{ item.bridge_name }} && ip link show type bridge_slave | grep -A1 {{ item.bridge_name }} || true
+  register: bridge_status
+  changed_when: false
+  loop: "{{ node_bridge_configs }}"
+  when: node_bridge_configs is defined
+
+- name: Display bridge status
+  debug:
+    msg: "Bridge {{ item.item.bridge_name }}: {{ item.stdout_lines }}"
+  loop: "{{ bridge_status.results }}"
+  when: bridge_status.results is defined

@@ -1,0 +1,24 @@
+---
+- name: Load 8021q module
+  modprobe:
+    name: 8021q
+    state: present
+
+- name: Create VLAN interfaces for all mapped networks
+  shell: |
+    if ! ip link show {{ item.interface }}.{{ item.vlan_id }} >/dev/null 2>&1; then
+      ip link add link {{ item.interface }} name {{ item.interface }}.{{ item.vlan_id }} type vlan id {{ item.vlan_id }}
+      echo "created"
+    else
+      echo "exists"
+    fi
+  register: vlan_result
+  changed_when: "'created' in vlan_result.stdout"
+  loop: "{{ node_bridge_configs }}"
+  when: node_bridge_configs is defined
+
+- name: Bring up VLAN interfaces
+  shell: ip link set {{ item.interface }}.{{ item.vlan_id }} up
+  changed_when: false
+  loop: "{{ node_bridge_configs }}"
+  when: node_bridge_configs is defined

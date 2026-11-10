@@ -1,0 +1,65 @@
+---
+- name: Create Prometheus values file from template
+  template:
+    src: prometheus-values.yml.j2
+    dest: /tmp/prometheus-values.yml
+    mode: '0644'
+
+- name: Deploy Prometheus stack using Helm
+  shell: |
+    helm upgrade --install {{ prometheus_release_name }} {{ prometheus_chart_name }} \
+      --repo {{ prometheus_chart_repo }} \
+      --version {{ prometheus_chart_version }} \
+      --namespace {{ monitoring_namespace }} \
+      --values /tmp/prometheus-values.yml \
+      --wait=false
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Create ServiceMonitor for KubeVirt metrics
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f - <<'EOF'
+    apiVersion: monitoring.coreos.com/v1
+    kind: ServiceMonitor
+    metadata:
+      name: kubevirt-metrics
+      namespace: {{ monitoring_namespace }}
+      labels:
+        prometheus: kube-prometheus
+    spec:
+      selector:
+        matchLabels:
+          prometheus.kubevirt.io: "true"
+      namespaceSelector:
+        matchNames:
+          - kubevirt
+      endpoints:
+        - port: metrics
+          interval: 30s
+          scheme: https
+          tlsConfig:
+            insecureSkipVerify: true
+    EOF
+  changed_when: false
+  when: enable_kubevirt_monitoring | bool
+
+- name: Expose Prometheus via NodePort
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f - <<'EOF'
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: prometheus-nodeport
+      namespace: {{ monitoring_namespace }}
+    spec:
+      type: NodePort
+      ports:
+        - port: 9090
+          targetPort: 9090
+          nodePort: 30090
+          protocol: TCP
+      selector:
+        app.kubernetes.io/name: prometheus
+        prometheus: {{ prometheus_release_name }}-kube-prom-prometheus
+    EOF
+  changed_when: false

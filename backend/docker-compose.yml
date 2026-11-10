@@ -1,0 +1,55 @@
+# NOTE: Superseded by root-level docker-compose.yml — keep for standalone backend development only.
+# To run the full stack use: docker compose up -d (from project root)
+
+services:
+  # PostgreSQL Database — credentials come from env_file (POSTGRES_DB/USER/PASSWORD)
+  postgres:
+    image: postgres:15-alpine
+    container_name: drift-postgres
+    env_file:
+      - ../central_hub/deploy/.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drift"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend — all config comes from env_file
+  backend:
+    build:
+      context: ..
+      dockerfile: ./backend/Dockerfile
+    container_name: drift-backend
+    env_file:
+      - ../central_hub/deploy/.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+      - ../cluster_api:/app/cluster_api
+      - ../ansible:/app/ansible
+      - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # pgAdmin (Optional - for database management)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: drift-pgadmin
+    env_file:
+      - ../central_hub/deploy/.env
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    profiles:
+      - tools  # Only start with: docker compose --profile tools up
+
+volumes:
+  postgres_data:

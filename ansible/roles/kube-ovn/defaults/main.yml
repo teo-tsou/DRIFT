@@ -1,0 +1,19 @@
+---
+# KubeOVN version — pin and bump deliberately
+kubeovn_version: "v1.13.0"
+kubeovn_install_script_url: "https://raw.githubusercontent.com/kubeovn/kube-ovn/{{ kubeovn_version }}/dist/images/install.sh"
+
+# Kubeconfig path on the server node (K3s default)
+kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# Must match the cluster's --cluster-cidr / --service-cidr
+# The orchestrator passes pod_cidr/svc_cidr as extra_vars; we use prefixed names
+# to avoid recursive Jinja2 template loops ({{ pod_cidr | default(pod_cidr) }})
+kubeovn_pod_cidr: "10.16.0.0/16"
+kubeovn_svc_cidr: "10.96.0.0/12"
+kubeovn_join_cidr: "100.64.0.0/16"
+
+# OVN networks to create as Subnet CRDs + Multus NADs
+# Each entry: { name: "prod-vms", cidr: "192.168.10.0/24", gateway: "192.168.10.1" }
+# gateway is optional — defaults to first usable IP (.1)
+ovn_networks: []

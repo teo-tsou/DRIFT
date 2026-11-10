@@ -1,0 +1,27 @@
+# EMT dataset sender: the vehicle camera. Replays the dataset images as a UDP
+# stream at 12 FPS to the receiver's floating IP. It does NOT migrate; it
+# runs on the vehicle (UE) side and reads the dataset from the host.
+# Copy the dataset to the node first:  <node>:/srv/emt/images/test/images
+apiVersion: v1
+kind: Pod
+metadata:
+  name: emt-sender
+  namespace: default
+spec:
+  restartPolicy: Always
+  containers:
+  - name: sender
+    image: localhost/drift-emt-yolo:udp
+    imagePullPolicy: IfNotPresent
+    # --resize 1280 re-encodes to 1280x720 (~14 Mbps at 12 FPS, fits the 5G
+    # uplink); --resize 0 sends the original 2560x1440 files (~92 Mbps).
+    command: ["python3", "/app/drift_sender.py", "--image-dir", "/data/images/test/images",
+              "--target-host", "10.220.3.104", "--target-port", "5005", "--loop", "--fps", "12",
+              "--resize", "1280"]
+    volumeMounts:
+    - { name: dataset, mountPath: /data, readOnly: true }
+    resources:
+      requests: { cpu: "100m", memory: "64Mi" }
+  volumes:
+  - name: dataset
+    hostPath: { path: /srv/emt, type: Directory }

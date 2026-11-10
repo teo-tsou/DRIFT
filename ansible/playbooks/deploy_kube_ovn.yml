@@ -1,0 +1,83 @@
+---
+# Deploys KubeOVN as the primary CNI on a management cluster.
+# Prerequisites:
+#   - K3s installed with --flannel-backend=none --disable-network-policy
+#   - Multus already deployed (deploy_multus.yml)
+#   - Inventory contains ovn_networks list under cluster_vars or passed as extra_vars
+#
+# Extra vars passed by orchestrator:
+#   - pod_cidr       (must match K3s cluster-cidr)
+#   - svc_cidr       (must match K3s service-cidr)
+#   - ovn_networks   (list of {name, cidr, gateway})
+#   - cluster_id     (for logging)
+
+- name: Deploy KubeOVN CNI
+  hosts: management_nodes
+  become: true
+  gather_facts: true
+
+  vars:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+  pre_tasks:
+    - name: Confirm server node has kubeconfig
+      stat:
+        path: "{{ kubeconfig }}"
+      register: kube_cfg
+      run_once: true
+
+    - name: Fail if kubeconfig missing (not a server node)
+      fail:
+        msg: "No kubeconfig at {{ kubeconfig }} — ensure this plays runs on a server node"
+      when: not kube_cfg.stat.exists
+      run_once: true
+
+    - name: Confirm flannel is disabled
+      shell: |
+        kubectl --kubeconfig {{ kubeconfig }} get cm -n kube-system rke2-coredns-rke2-coredns 2>/dev/null \
+          || kubectl --kubeconfig {{ kubeconfig }} get cm -n kube-system kube-flannel-cfg 2>/dev/null \
+          && echo "flannel_present" || echo "flannel_absent"
+      register: flannel_check
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Warn if Flannel appears active
+      debug:
+        msg: >
+          WARNING: Flannel ConfigMap detected. KubeOVN requires K3s to be started
+          with --flannel-backend=none. CNI conflicts may occur.
+      when: "'flannel_present' in flannel_check.stdout"
+      run_once: true
+
+  tasks:
+    - name: Deploy KubeOVN role
+      include_role:
+        name: kube-ovn
+      vars:
+        kubeovn_pod_cidr: "{{ pod_cidr | default('10.16.0.0/16') }}"
+        kubeovn_svc_cidr: "{{ svc_cidr | default('10.96.0.0/12') }}"
+        kubeovn_join_cidr: "100.64.0.0/16"
+        ovn_networks: "{{ ovn_networks | default([]) }}"
+
+  post_tasks:
+    - name: Wait for all nodes to be Ready (up to 5 min)
+      shell: |
+        kubectl --kubeconfig {{ kubeconfig }} wait node --all \
+          --for=condition=Ready --timeout=300s 2>&1 || true
+      changed_when: false
+      run_once: true
+
+    - name: Verify nodes are Ready after CNI install
+      shell:
+        cmd: |
+          kubectl --kubeconfig {{ kubeconfig }} get nodes \
+            --no-headers | awk '{print $2}' | sort | uniq -c
+      register: node_status
+      changed_when: false
+      run_once: true
+
+    - name: Show node readiness
+      debug:
+        msg: "Node status counts: {{ node_status.stdout_lines }}"
+      run_once: true

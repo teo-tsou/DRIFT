@@ -1,0 +1,23 @@
+---
+# xcluster_migration role defaults
+#
+# Prepares a PAIR of DRIFT edge clusters for KubeVirt decentralized
+# (cross-cluster) live migration. Run against a group of exactly two cluster
+# server nodes; each host must define `cluster_pod_cidr` and `peer_host`
+# (the inventory hostname of the other cluster's server).
+
+kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+kubevirt_namespace: kubevirt
+
+# Sync/disk-copy control channel port exposed by virt-synchronization-controller.
+xcluster_sync_port: 9185
+
+# Disable the extra TLS layer on the libvirt migration *stream* (memory/disk copy).
+# The synchronization control channel always uses mTLS via kubevirt-ca regardless.
+# true is correct for a flat trusted L2 lab; set false for real sites with a
+# properly trusted stream path (EVPN + shared trust).
+xcluster_disable_stream_tls: true
+
+# Persistent route re-assertion interval (guards against DHCP lease renew
+# flushing the cross-cluster pod-CIDR route).
+xcluster_route_reassert_sec: 60

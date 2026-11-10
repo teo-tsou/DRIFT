@@ -1,0 +1,18 @@
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: {{ evpn_nad_name }}
+  namespace: {{ evpn_nad_namespace }}
+spec:
+  # No-IPAM bridge onto the EVPN stretched-L2 bridge. The VM's guest OS assigns
+  # its own static address on {{ evpn_overlay_subnet }} (matched by MAC), so the
+  # IP is carried by the guest and survives a cross-cluster live migration.
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "{{ evpn_nad_name }}",
+      "type": "bridge",
+      "bridge": "{{ evpn_bridge }}",
+      "mtu": {{ evpn_overlay_mtu }},
+      "ipam": {}
+    }

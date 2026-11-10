@@ -1,0 +1,12 @@
+---
+- name: reload systemd
+  systemd:
+    daemon_reload: true
+
+- name: reassert evpn link
+  command: /usr/local/sbin/drift-evpn-link.sh
+
+- name: restart frr
+  systemd:
+    name: frr
+    state: restarted

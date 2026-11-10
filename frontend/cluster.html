@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DRIFT — Edge Cluster</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23161b22'/><text x='16' y='23' font-family='system-ui,sans-serif' font-size='18' font-weight='700' fill='%23cdd9e5' text-anchor='middle'>D</text></svg>">
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface-2: #1c2330;
+            --border: #30363d;
+            --accent: #4493f8;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --text: #e6edf3;
+            --text-2: #8b949e;
+            --text-muted: #8b949e;
+            --radius: 6px;
+            --nav-h: 52px;
+            --font: system-ui, -apple-system, sans-serif;
+            --mono: ui-monospace, 'SF Mono', monospace;
+        }
+
+        html, body { height: 100%; font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; }
+
+        /* ── Navbar ── */
+        .navbar {
+            background: var(--surface);
+            height: var(--nav-h);
+            display: flex; align-items: center; padding: 0 24px;
+            position: sticky; top: 0; z-index: 100;
+            border-bottom: 1px solid var(--border);
+        }
+        .navbar-brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+        .navbar-name { font-size: .95em; font-weight: 700; color: var(--text); }
+        .navbar-version { font-size: .68em; color: var(--text-2); font-weight: 400; margin-left: 3px; }
+        .navbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+        .back-btn {
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 5px 12px; background: var(--surface-2); border: 1px solid var(--border);
+            border-radius: var(--radius); color: var(--text-2); font-size: .82em;
+            text-decoration: none; transition: color .1s;
+        }
+        .back-btn:hover { color: var(--text); }
+
+        /* ── Page ── */
+        .page { max-width: 1280px; margin: 0 auto; padding: 24px 20px; }
+
+        /* ── Cluster header ── */
+        .cluster-header-strip {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 16px 20px; margin-bottom: 18px;
+            display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+        }
+        .cluster-header-info { flex: 1; min-width: 0; }
+        .cluster-header-name { font-size: 1.25em; font-weight: 700; color: var(--text); }
+        .cluster-header-sub { font-size: .78em; color: var(--text-2); margin-top: 2px; }
+
+        /* ── Status badge ── */
+        .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 4px; font-size: .72em; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+        .status-active      { background: rgba(63,185,80,.12);  color: var(--success); }
+        .status-degraded    { background: rgba(210,153,34,.12); color: var(--warning); }
+        .status-failed      { background: rgba(248,81,73,.12);  color: var(--danger); }
+        .status-provisioning, .status-installing_addons, .status-configuring_network { background: rgba(99,102,241,.1); color: #818cf8; }
+        .status-pending     { background: rgba(210,153,34,.1);  color: var(--warning); }
+        .status-deleting    { background: rgba(248,81,73,.1);   color: var(--danger); }
+
+        /* ── Tab nav ── */
+        .tab-nav { display: flex; gap: 1px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+        .tab {
+            background: none; border: none; border-bottom: 2px solid transparent;
+            padding: 9px 16px; margin-bottom: -1px;
+            cursor: pointer; font-size: .85em; font-weight: 500;
+            color: var(--text-2); transition: color .1s; white-space: nowrap;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* ── Cards ── */
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 14px; }
+        .card-title { font-size: .88em; font-weight: 600; color: var(--text); margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .uc-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; gap: 10px; }
+
+        /* ── Buttons ── */
+        .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 13px; background: #21262d; color: #cdd9e5; border: 1px solid #444c56; border-radius: var(--radius); font-size: .82em; font-weight: 500; font-family: var(--font); cursor: pointer; transition: background .12s, border-color .12s; white-space: nowrap; }
+        .btn:hover { background: #2d333b; border-color: #636e7b; }
+        .btn:disabled { opacity: .35; cursor: not-allowed; }
+        .btn-primary { background: #21262d; color: #cdd9e5; border: 1px solid #444c56; }
+        .btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); }
+        .btn-ghost:hover { color: #cdd9e5; background: var(--surface-2); border-color: #444c56; }
+        .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+        .btn-danger:hover { background: rgba(248,81,73,.08); }
+        .btn-secondary { background: transparent; color: var(--text-2); border: 1px solid var(--border); }
+        .btn-sm { padding: 4px 9px; font-size: .78em; }
+
+        /* ── Spinner ── */
+        .spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ── Node table ── */
+        .node-table { width: 100%; border-collapse: collapse; font-size: .85em; }
+        .node-table th { padding: 8px 12px; text-align: left; font-size: .72em; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--border); }
+        .node-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text); vertical-align: middle; }
+        .node-table tr:last-child td { border-bottom: none; }
+        .node-table tr:hover td { background: var(--surface-2); }
+        .role-tag { display: inline-block; font-size: .72em; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); margin-right: 3px; text-transform: uppercase; }
+        .role-worker { border-color: rgba(63,185,80,.3); color: var(--success); background: rgba(63,185,80,.06); }
+        .ready-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+        .ready-yes { background: var(--success); }
+        .ready-no  { background: var(--danger); }
+        .sync-note { font-size: .75em; color: var(--text-2); font-family: var(--mono); }
+
+        /* ── Progress bar ── */
+        .progress-bar { height: 2px; background: var(--border); border-radius: 1px; margin: 6px 0; }
+        .progress-fill { height: 100%; border-radius: 1px; background: var(--accent); transition: width .4s; }
+        .progress-fill.deleting { background: var(--danger); }
+
+        /* ── Alerts ── */
+        .alert { padding: 8px 12px; border-radius: var(--radius); font-size: .82em; margin-bottom: 10px; border: 1px solid; }
+        .alert-success { background: rgba(63,185,80,.06);  color: var(--success); border-color: rgba(63,185,80,.2); }
+        .alert-error   { background: rgba(248,81,73,.06);  color: var(--danger);  border-color: rgba(248,81,73,.2); }
+        .alert-info    { background: rgba(56,189,248,.06); color: #7dd3fc;        border-color: rgba(56,189,248,.2); }
+        .alert-warning { background: rgba(210,153,34,.06); color: var(--warning); border-color: rgba(210,153,34,.2); }
+
+        /* ── Logs ── */
+        .logs-container { background: var(--bg); color: var(--text-2); padding: 14px; border-radius: var(--radius); max-height: 520px; overflow-y: auto; font-family: var(--mono); font-size: .78em; border: 1px solid var(--border); }
+        .log-entry { padding: 3px 0; border-bottom: 1px solid var(--border); line-height: 1.5; }
+        .log-entry:last-child { border-bottom: none; }
+        .log-timestamp { color: var(--text-2); margin-right: 8px; }
+        .log-level-INFO    { color: var(--success); }
+        .log-level-WARNING { color: var(--warning); }
+        .log-level-ERROR   { color: var(--danger); }
+        .log-level-DEBUG   { color: var(--text-2); }
+
+        /* ── VM table ── */
+        .vm-table { width: 100%; border-collapse: collapse; font-size: .85em; }
+        .vm-table th { padding: 8px 12px; text-align: left; font-size: .72em; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+        .vm-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        .vm-table tr:last-child td { border-bottom: none; }
+        .vm-table tr:hover td { background: var(--surface-2); }
+        .vm-ns-group th { background: var(--bg); color: var(--text-2); font-size: .7em; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+        .vm-status { display: inline-flex; align-items: center; gap: 5px; font-size: .82em; }
+        .vm-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+        .vm-running  { color: var(--success); } .vm-running  .vm-dot { background: var(--success); }
+        .vm-stopped  { color: var(--text-2);  } .vm-stopped  .vm-dot { background: var(--text-2); }
+        .vm-starting { color: var(--warning); } .vm-starting .vm-dot { background: var(--warning); }
+        .vm-error    { color: var(--danger);  } .vm-error    .vm-dot { background: var(--danger); }
+
+        /* ── Addon badges ── */
+        .addon-badge { display: inline-flex; align-items: center; gap: 4px; font-size: .72em; padding: 2px 8px; border-radius: 4px; border: 1px solid; font-weight: 500; }
+        .addon-ok      { background: rgba(63,185,80,.06);  color: var(--success); border-color: rgba(63,185,80,.2); }
+        .addon-degraded { background: rgba(210,153,34,.06); color: var(--warning); border-color: rgba(210,153,34,.2); }
+        .addon-missing { background: rgba(248,81,73,.06);  color: var(--danger);  border-color: rgba(248,81,73,.2); }
+
+        /* ── Modals ── */
+        .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 500; align-items: center; justify-content: center; }
+        .modal-overlay.open { display: flex; }
+        .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; }
+        .modal h3 { font-size: 1em; font-weight: 600; color: var(--text); margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; font-size: .8em; font-weight: 500; color: var(--text-2); margin-bottom: 4px; }
+        .form-group small { display: block; font-size: .72em; color: var(--text-2); margin-top: 3px; }
+        input[type="text"], input[type="number"], select, textarea {
+            width: 100%; padding: 7px 10px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); font-size: .85em; font-family: var(--font); outline: none;
+        }
+        input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+        select option { background: var(--surface); }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        /* ── Migration modal ── */
+        .mg-modal { max-width: 480px; }
+        .mg-route-row { display: flex; align-items: center; gap: 10px; }
+        .mg-chip { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; }
+        .mg-chip-label { font-size: .65em; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 3px; }
+        .mg-chip-name { font-size: .85em; font-weight: 500; color: var(--text); font-family: var(--mono); }
+        .mg-arrow { color: var(--text-2); font-size: 1.1em; flex-shrink: 0; }
+        .mg-zdt { font-size: .78em; color: var(--success); padding: 6px 10px; border: 1px solid rgba(63,185,80,.2); border-radius: var(--radius); background: rgba(63,185,80,.04); margin-top: 10px; display: flex; align-items: center; gap: 6px; }
+        .mg-zdt-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+        .mg-progress { padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); }
+        .mg-progress-label { font-size: .82em; color: var(--text); margin-bottom: 8px; }
+        .mg-progress-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+        .mg-progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .6s; }
+        .mg-timer { font-size: .75em; color: var(--text-2); margin-top: 6px; font-family: var(--mono); }
+        .mg-status-text { font-size: .8em; color: var(--text-2); margin-top: 10px; line-height: 1.5; }
+
+        /* ── Danger modal ── */
+        .danger-modal-body { font-size: .85em; color: var(--text-2); line-height: 1.6; margin-bottom: 16px; }
+
+        /* ── Add Node form ── */
+        .add-node-form .form-group { margin-bottom: 10px; }
+
+        /* ── VNC frame ── */
+        .vnc-frame { width: 100%; height: 580px; border: 1px solid var(--border); border-radius: var(--radius); background: #000; display: block; }
+
+        /* ── Create VM ── */
+        .disk-option { display: flex; gap: 10px; align-items: center; }
+        .feasibility-note { font-size: .75em; color: var(--text-2); margin-top: 4px; padding: 5px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); }
+    </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar">
+    <a href="index.html" class="navbar-brand">
+        <span class="navbar-name">DRIFT <span class="navbar-version">v0.1</span></span>
+    </a>
+    <div class="navbar-right">
+        <a href="index.html" class="back-btn">← Back to Dashboard</a>
+    </div>
+</nav>
+
+<div class="page">
+
+    <!-- Cluster header strip -->
+    <div class="cluster-header-strip">
+        <div class="cluster-header-info">
+            <div class="cluster-header-name" id="cluster-title">Loading…</div>
+            <div class="cluster-header-sub" id="cluster-sub"></div>
+        </div>
+        <span id="cluster-status-badge"></span>
+    </div>
+
+    <!-- Tab nav -->
+    <div class="tab-nav">
+        <button class="tab active" onclick="switchTab('nodes', this)">Nodes</button>
+        <button class="tab" onclick="switchTab('vms', this)">VMs</button>
+        <button class="tab" onclick="switchTab('pods', this)">Pods</button>
+        <button class="tab" onclick="switchTab('logs', this)">Logs</button>
+    </div>
+
+    <!-- Nodes -->
+    <div class="tab-content active" id="tab-nodes">
+        <div class="card">
+            <div class="uc-toolbar">
+                <div class="card-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Nodes</div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <span class="sync-note" id="nodes-sync" style="font-size:.78em;color:var(--text-muted);"></span>
+                    <button class="btn btn-ghost btn-sm" id="nodes-sync-btn" onclick="syncLiveStatus()">Sync</button>
+                    <button class="btn btn-primary" onclick="openAddNodeModal()">+ Add Node</button>
+                </div>
+            </div>
+            <div id="nodes-content"><div class="spinner"></div></div>
+        </div>
+    </div>
+
+
+    <!-- VMs -->
+    <div class="tab-content" id="tab-vms">
+        <div class="card">
+            <div class="uc-toolbar">
+                <div class="card-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Virtual Machines</div>
+                <button class="btn btn-primary" onclick="openCreateVMModal()">+ New VM</button>
+            </div>
+            <div id="vms-content"><div class="spinner"></div></div>
+        </div>
+    </div>
+
+    <!-- Pods -->
+    <div class="tab-content" id="tab-pods">
+        <div class="card">
+            <div class="uc-toolbar">
+                <div class="card-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Pods</div>
+                <label style="display:flex;gap:6px;align-items:center;font-size:.8em;color:var(--text-muted);cursor:pointer;">
+                    <input type="checkbox" id="pods-show-system" onchange="loadAllPods()"> show system pods
+                </label>
+            </div>
+            <div id="pods-content"><div class="spinner"></div></div>
+        </div>
+    </div>
+
+    <!-- Logs -->
+    <div class="tab-content" id="tab-logs">
+        <div class="card">
+            <div class="uc-toolbar">
+                <div class="card-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0;">Deployment Logs</div>
+                <button class="btn btn-secondary" onclick="loadLogs()">↺ Refresh</button>
+            </div>
+            <div id="logs-content"><div class="spinner"></div></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Create VM Modal -->
+<div class="modal-overlay" id="vm-modal">
+    <div class="modal" style="width:520px;">
+        <h3>New Virtual Machine</h3>
+        <div id="vm-modal-error" style="color:var(--danger);font-size:.85em;margin-bottom:12px;"></div>
+        <div class="form-grid">
+            <div class="form-row" style="grid-column:1/-1;">
+                <label>VM Name *</label>
+                <input type="text" id="vm-name" placeholder="my-vm">
+            </div>
+            <div class="form-row">
+                <label>Namespace</label>
+                <input type="text" id="vm-namespace" placeholder="default" value="default">
+            </div>
+            <div class="form-row">
+                <label>Image</label>
+                <select id="vm-image">
+                    <option value="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img">Ubuntu 22.04</option>
+                    <option value="https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img">Ubuntu 20.04</option>
+                    <option value="https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2">Fedora 40</option>
+                    <option value="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2">Debian 12</option>
+                    <option value="custom">Custom URL…</option>
+                </select>
+            </div>
+            <div class="form-row" id="vm-custom-image-row" style="display:none;grid-column:1/-1;">
+                <label>Custom Image</label>
+                <input type="text" id="vm-custom-image" placeholder="https://example.com/image.qcow2">
+            </div>
+            <div class="form-row">
+                <label>CPU (cores)</label>
+                <select id="vm-cpu">
+                    <option value="1">1 vCPU</option>
+                    <option value="2" selected>2 vCPU</option>
+                    <option value="4">4 vCPU</option>
+                    <option value="8">8 vCPU</option>
+                </select>
+            </div>
+            <div class="form-row">
+                <label>Memory</label>
+                <select id="vm-memory">
+                    <option value="512Mi">512 Mi</option>
+                    <option value="1Gi">1 Gi</option>
+                    <option value="2Gi" selected>2 Gi</option>
+                    <option value="4Gi">4 Gi</option>
+                    <option value="8Gi">8 Gi</option>
+                    <option value="16Gi">16 Gi</option>
+                </select>
+            </div>
+            <div class="form-row" style="grid-column:1/-1;">
+                <label>Disk Mode</label>
+                <div style="display:flex;gap:12px;margin-top:4px;">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;text-transform:none;font-size:.88em;font-weight:400;color:var(--text);">
+                        <input type="radio" name="vm-disk-mode" id="vm-disk-ephemeral" value="ephemeral" checked onchange="onVMDiskModeChange()">
+                        Ephemeral <span style="color:var(--text-muted);font-size:.85em;">(Fast boot, reset on stop/start, no disk resize)</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;text-transform:none;font-size:.88em;font-weight:400;color:var(--text);">
+                        <input type="radio" name="vm-disk-mode" id="vm-disk-persistent" value="persistent" onchange="onVMDiskModeChange()">
+                        Persistent <span style="color:var(--text-muted);font-size:.85em;">(Persistent PVC, survives stop/start)</span>
+                    </label>
+                </div>
+            </div>
+            <div class="form-row" id="vm-disk-size-row" style="display:none;grid-column:1/-1;">
+                <label>Disk Size</label>
+                <input type="text" id="vm-disk" value="20Gi" placeholder="e.g. 20Gi">
+            </div>
+        </div>
+        <div id="vm-resource-status" style="font-size:.78em;margin:10px 0 16px;padding:10px 14px;background:var(--surface-2);border-radius:8px;border-left:3px solid var(--accent);">
+            <span style="color:var(--text-muted);">Checking available node resources…</span>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeVMModal()">Cancel</button>
+            <button class="btn btn-primary" id="vm-create-btn" onclick="submitCreateVM()">Create VM</button>
+        </div>
+    </div>
+</div>
+
+<!-- Live Migration Modal -->
+<div class="modal-overlay" id="migrate-modal">
+    <div class="modal mg-modal">
+        <h3 id="migrate-modal-title">Live Migration</h3>
+
+        <!-- ── Select view ── -->
+        <div id="migrate-form-body">
+            <div id="migrate-modal-error" class="alert alert-error" style="display:none;margin-bottom:12px;"></div>
+            <div class="mg-route-row">
+                <div class="mg-chip">
+                    <div class="mg-chip-label">SOURCE</div>
+                    <div class="mg-chip-name" id="mg-source-node-display">—</div>
+                </div>
+                <div class="mg-arrow">→</div>
+                <div class="mg-chip">
+                    <div class="mg-chip-label">TARGET</div>
+                    <div class="mg-chip-name" id="mg-target-node-display">Select…</div>
+                </div>
+            </div>
+            <div class="form-group" style="margin-top:14px;">
+                <label>Target (node in this cluster, or another cluster)</label>
+                <select id="migrate-target-node"></select>
+            </div>
+            <div class="mg-zdt">
+                <span class="mg-zdt-dot"></span>
+                Zero downtime — memory state transferred live, VM keeps serving traffic
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" onclick="closeMigrateModal()">Cancel</button>
+                <button class="btn" onclick="submitMigration()">Start Migration</button>
+            </div>
+        </div>
+
+        <!-- ── Progress view ── -->
+        <div id="migrate-progress-body" style="display:none;">
+            <div class="mg-progress">
+                <div class="mg-progress-label" id="migrate-progress-phase">Transferring memory state…</div>
+                <div class="mg-progress-bar">
+                    <div class="mg-progress-fill" id="migrate-progress-fill" style="width:0%"></div>
+                </div>
+                <div class="mg-timer" id="migrate-progress-timer">0s elapsed</div>
+            </div>
+            <div id="migrate-steps" style="margin-top:12px;"></div>
+            <div class="mg-status-text" id="migrate-progress-detail"></div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" onclick="closeMigrateModal()">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Node Modal -->
+<div class="modal-overlay" id="add-node-modal">
+    <div class="modal" style="width:480px;">
+        <h3>Add Node to Cluster</h3>
+        <div id="add-node-modal-error" style="color:var(--danger);font-size:.85em;margin-bottom:12px;min-height:1.2em;"></div>
+        <div class="form-row">
+            <label>Node Name</label>
+            <input type="text" id="add-node-name" placeholder="e.g. edge-node-3">
+        </div>
+        <div class="form-row">
+            <label>Host / IP</label>
+            <input type="text" id="add-node-host" placeholder="e.g. 192.168.1.103">
+        </div>
+        <div class="form-grid">
+            <div class="form-row">
+                <label>SSH User</label>
+                <input type="text" id="add-node-user" value="root" placeholder="root">
+            </div>
+            <div class="form-row">
+                <label>Role</label>
+                <select id="add-node-role">
+                    <option value="agent">Worker (agent)</option>
+                    <option value="server">Control Plane (server)</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <label>SSH Key Path <span style="color:var(--text-muted);font-weight:400;">(optional)</span></label>
+            <input type="text" id="add-node-ssh-key" placeholder="e.g. /root/.ssh/id_rsa">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeAddNodeModal()">Cancel</button>
+            <button class="btn btn-primary" id="add-node-submit-btn" onclick="submitAddNode()">Add Node</button>
+        </div>
+    </div>
+</div>
+
+
+
+<!-- Danger Confirm Modal (shared for VM delete, UC delete, etc.) -->
+<div class="modal-overlay" id="danger-confirm-modal">
+    <div class="modal" style="width:400px;padding:28px 28px 24px;">
+        <!-- Icon + title row -->
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px;">
+            <div style="flex-shrink:0;width:40px;height:40px;border-radius:10px;
+                        background:rgba(248,81,73,.15);border:1px solid rgba(248,81,73,.3);
+                        display:flex;align-items:center;justify-content:center;font-size:1.1em;">
+                🗑
+            </div>
+            <div>
+                <div style="font-size:.6em;font-weight:700;letter-spacing:.12em;
+                            color:var(--danger);font-family:'SF Mono','Fira Code',monospace;
+                            margin-bottom:4px;">CONFIRM DELETE</div>
+                <div id="danger-modal-title" style="font-size:1em;font-weight:700;
+                            color:var(--text);white-space:nowrap;overflow:hidden;
+                            text-overflow:ellipsis;max-width:290px;"></div>
+            </div>
+        </div>
+
+        <!-- Divider -->
+        <div style="border-top:1px solid var(--border);margin-bottom:16px;"></div>
+
+        <!-- Body text -->
+        <p id="danger-modal-body" style="color:var(--text-muted);font-size:.88em;
+                    line-height:1.6;margin:0 0 10px;word-break:break-word;"></p>
+        <p style="color:rgba(248,81,73,.85);font-size:.82em;margin:0 0 20px;
+                    display:flex;align-items:center;gap:6px;">
+            <span style="font-size:.9em;">⚠</span> This action cannot be undone.
+        </p>
+
+        <!-- Error -->
+        <div id="danger-modal-error" style="color:var(--danger);font-size:.82em;
+                    min-height:1.1em;margin-bottom:8px;"></div>
+
+        <!-- Actions -->
+        <div class="modal-actions" style="margin-top:4px;">
+            <button class="btn btn-secondary" onclick="closeDangerModal()">Cancel</button>
+            <button class="btn" id="danger-confirm-btn"
+                style="background:var(--danger);color:#fff;border-color:var(--danger);min-width:90px;">Delete</button>
+        </div>
+    </div>
+</div>
+
+<script src="cluster.js?v=10"></script>
+</body>
+</html>

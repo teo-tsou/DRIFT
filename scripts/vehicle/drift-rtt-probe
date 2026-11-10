@@ -1,0 +1,23 @@
+#!/bin/sh
+# drift-rtt-probe: the vehicle's round trip to the edge over 5G, for DRIFT's
+# autopilot (trigger "rtt"). The vehicle UE is not in the operator's ping
+# telemetry, so the vehicle measures the camera's own path: 10 pings over wwan0
+# (the LAN port reaches the same subnet, hence -I) to the edge node, back to
+# back, one window every ~2 s. Each window replaces $DRIFT_RTT_OUT with
+#   <unix time> <p90 ms|-> <median ms|-> <loss %>
+# and the backend reads it with the rest of the vehicle's state, so a decision
+# never waits for a ping window.
+TARGET=${DRIFT_RTT_TARGET:-10.220.2.170}
+OUT=${DRIFT_RTT_OUT:-/run/drift-rtt}
+while true; do
+  T=$(ping -I wwan0 -n -c 10 -i 0.2 -W 1 "$TARGET" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | sort -n)
+  N=$(printf '%s\n' "$T" | grep -c .)
+  if [ "$N" -gt 0 ]; then
+    P90=$(printf '%s\n' "$T" | sed -n "$(( N * 9 / 10 > 0 ? N * 9 / 10 : 1 ))p")
+    MED=$(printf '%s\n' "$T" | sed -n "$(( N / 2 + 1 ))p")
+  else
+    P90=- MED=-
+    sleep 1                       # wwan0 down: do not spin
+  fi
+  echo "$(date +%s.%N) $P90 $MED $(( (10 - N) * 10 ))" > $OUT.tmp && mv $OUT.tmp $OUT
+done

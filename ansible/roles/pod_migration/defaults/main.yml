@@ -1,0 +1,71 @@
+---
+# pod_migration — provisions an edge node for controller-driven CRIU pod
+# live-migration (see roles/pod_migration/README.md). Depends on the criu and
+# cri_o roles being applied first (CRIU + CRI-O with the `crun` RuntimeClass).
+
+# crun must be a DYNAMICALLY-linked build with +CRIU so it can dlopen
+# libcriu.so.2 at restore time — CRI-O bundles a *statically* linked crun that
+# cannot. We build it from source and install it as crun-drift; the cri_o
+# role's 17-drift-crun.conf points the `crun` runtime handler at this path.
+crun_drift_path: /usr/local/bin/crun-drift
+crun_version: "1.19.1"
+crun_git_url: "https://github.com/containers/crun.git"
+crun_build_dir: /root/crun-build
+crun_build_deps:
+  - build-essential
+  - pkg-config
+  - libtool
+  - libyajl-dev          # focal/noble: build against yajl (portable across json-c versions)
+  - libseccomp-dev
+  - libcap-dev
+  - libsystemd-dev
+  - libprotobuf-c-dev    # crun's +CRIU path includes criu headers -> protobuf-c/protobuf-c.h
+  - go-md2man
+  - autoconf
+  - automake
+  - python3
+  - git
+# libcriu-dev is installed separately + tolerantly: on the PPA path it comes from
+# the criu PPA; if criu was built from source (no PPA build for the release), the
+# criu role already installed the headers + criu.pc under /usr/local, so the apt
+# package is legitimately absent and its failure must not abort the crun build.
+
+# Shared checkpoint store. The images are written here on the source node and
+# read here on the target node, so it MUST be the same path on every node —
+# an NFS export is the simplest way to guarantee that.
+ckpt_store_path: /srv/drift-ckpt
+ckpt_store_manage_nfs: true          # false if you mount the store some other way
+ckpt_nfs_server: ""                  # host that exports the store (e.g. the mgmt hub)
+ckpt_nfs_export: /srv/drift-ckpt     # export path on the NFS server
+ckpt_nfs_mount_opts: "rw,hard,intr,vers=4"
+
+# Where to drop the migration controller CLI + the cgroup-image normalizer.
+migrate_bin_path: /usr/local/bin/drift-pod-migrate
+cgroup_strip_path: /usr/local/bin/drift-cgroup-strip
+# drift-node-agent: the privileged DaemonSet the migration is driven through
+# (instead of SSH). Deployed on control-plane nodes (those with a kubeconfig).
+node_agent_image: docker.io/library/python:3-slim
+node_agent_kubeconfig: /etc/rancher/k3s/k3s.yaml
+# Shared node-agent token. Set to ONE value across BOTH edge clusters so the
+# backend drives migrations on either with a single credential. Empty = generate
+# a random token once (fine for a lone cluster; cross-cluster pairing needs them
+# equal, so the orchestrator passes a shared token here).
+node_agent_token: ""
+
+# macvlan-l2 NAD: the shared-physical-L2 attachment the container floating IP
+# rides for CROSS-cluster follow (the OVN pod IP is cluster-local and can't move).
+# master = the NIC on the shared L2 the edge nodes share (the Envelope 10.220.3/24).
+macvlan_nad_name: macvlan-l2
+macvlan_nad_master: eth0
+# Return routes for OFF-SUBNET clients (a macvlan pod replies via the pod-network
+# default, which SNATs and breaks the TCP tuple, so e.g. the 5G UE — SNAT'd to
+# 10.220.0.x — can't stream from the floating IP directly). MUST STAY EMPTY in the
+# NAD: drift-pod-migrate pre-creates target pods with a dummy net1 address
+# (l2_dummy), and a static-IPAM route via the real L2 gateway is then unreachable,
+# which fails CNI ADD and breaks every cross-cluster pod migration. The proper fix
+# is for drift-node-agent to install these routes when it attaches the floating IP
+# post-restore; until then, off-subnet clients reach the pod via an on-link relay.
+macvlan_nad_routes: []
+# CNI plugins the macvlan NAD needs in /opt/cni/bin (kube-ovn ships its own set,
+# but not the generic macvlan + static IPAM plugins).
+pm_cni_plugins_version: "v1.5.1"

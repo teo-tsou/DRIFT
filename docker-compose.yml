@@ -1,0 +1,212 @@
+name: drift
+
+networks:
+  drift-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: drift-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: drift
+      POSTGRES_USER: drift
+      POSTGRES_PASSWORD: drift
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - drift-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drift"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI Backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    container_name: drift-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # the demo workload's floating IP (yolo-app; the bunny pod used .101)
+      DEMO_APP_HOST: "10.220.3.103"
+      # post-copy across clusters (memory-independent freeze) — the page-server
+      # channel is node-to-node routable on this flat testbed
+      DRIFT_POD_CROSS_POSTCOPY: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./ansible:/app/ansible
+      - ~/.ssh/id_rsa:/root/.ssh/id_rsa:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - drift-net
+    # --timeout-graceful-shutdown: a reload otherwise waits forever for the GUI's
+    # endless MJPEG (/extreme-edge/stream) to close, and the API stays down
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3 ${UVICORN_EXTRA_ARGS:---reload}
+
+  # ── Frontend (nginx) ─────────────────────────────────────────────────────────
+  frontend:
+    image: nginx:alpine
+    container_name: drift-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - drift-net
+
+  # ── MEC 021 stack (always on — the GUI's "MEC API" page drives it) ───────────
+  # NBI → DRIFT Framework → SBI (existing backend). No service here holds a
+  # kubeconfig; drift-controller and mec021-api only ever talk HTTP. These used
+  # to sit behind `profiles: [mec]`; the frontend now depends on them, so they
+  # come up with the default stack (`docker compose up`).
+  camara-qod:
+    build: ./mec/camara-mocks
+    container_name: drift-camara-qod
+    restart: unless-stopped
+    command: uvicorn camara_mocks:qod_app --host 0.0.0.0 --port 9001
+    ports: ["9001:9001"]
+    networks: [drift-net]
+
+  camara-pqos:
+    build: ./mec/camara-mocks
+    container_name: drift-camara-pqos
+    restart: unless-stopped
+    command: uvicorn camara_mocks:pqos_app --host 0.0.0.0 --port 9002
+    ports: ["9002:9002"]
+    networks: [drift-net]
+
+  camara-location:
+    build: ./mec/camara-mocks
+    container_name: drift-camara-location
+    restart: unless-stopped
+    command: uvicorn camara_mocks:location_app --host 0.0.0.0 --port 9003
+    ports: ["9003:9003"]
+    networks: [drift-net]
+
+  energy-telemetry:
+    build: ./mec/camara-mocks
+    container_name: drift-energy-telemetry
+    restart: unless-stopped
+    command: uvicorn camara_mocks:energy_app --host 0.0.0.0 --port 9004
+    ports: ["9004:9004"]
+    networks: [drift-net]
+
+  # DRIFT Framework: context-awareness, optimal edge selection, migration control.
+  drift-controller:
+    build: ./mec/drift-controller
+    container_name: drift-controller
+    restart: unless-stopped
+    environment:
+      DRIFT_BACKEND_URL: http://backend:8000
+      CAMARA_QOD_URL: http://camara-qod:9001
+      CAMARA_LOCATION_URL: http://camara-location:9003
+      ENERGY_TELEMETRY_URL: http://energy-telemetry:9004
+      # Real ECB greenness (DRIFT Public API) for the ARM edges; credentials
+      # come from the git-ignored .env. Other clusters keep the telemetry mock.
+      ECB_API_URL: ${ECB_API_URL:-}
+      ECB_API_USER: ${ECB_API_USER:-}
+      ECB_API_PASSWORD: ${ECB_API_PASSWORD:-}
+      # Watts = measured power of the EMT YOLO receiver above idle (2026-10-14):
+      # Orin 13.7 W at 12 FPS, Nano 5.0 W at 6.6 FPS (its maximum).
+      ECB_EDGE_MAP: "drift-edge-agx=agx-orin:yolo26s:13.7,drift-vehicle=jetson-nano:yolo26n:5.0"
+      # The vehicle's greenness and energy are those of the EV battery (real
+      # Tesla data, /v1/getEVGreenness), not a PV forecast.
+      ECB_VEHICLE_CLUSTERS: "drift-vehicle"
+      # Real ENVELOPE PQoS service (testbed host 10.220.2.49). The controller
+      # calls it directly for the UE-QoS prediction signals; UE_IMSI selects
+      # the 5G device. Leave UE_IMSI empty to disable UE-QoS and fall back to
+      # energy/distance-only selection.
+      PQOS_URL: http://10.220.2.49:8001
+      # The application server the 5G network sees for the UE's flow: the hub
+      # relay (10.220.3.30) that fronts the pod workloads — NOT the pod's
+      # floating IP (the relay terminates the UE's TCP).
+      PQOS_APP_SERVER: "10.220.3.30"
+      # default = the vehicle Jetson; the backend switches it (POST /ue) when
+      # the dashboard's active UE profile changes
+      UE_IMSI: "999700000000020"
+      # H-PQOS-I predicts the device's usable link CAPACITY (~76-82 Mbps
+      # healthy on ncsrd-ue1, measured 2026-09-03) instead of following its
+      # traffic, so the threshold is absolute: capacity below the app's ~4 Mbps
+      # need = real degradation. Latency stays on SIMPLE-QS-PQOS-I (H-PQOS-I
+      # has no E2E_LATENCY).
+      PQOS_METHOD: "H-PQOS-I"
+      PQOS_DL_MIN_MBPS: "4.0"
+      PQOS_UL_MIN_MBPS: "2.0"
+      DISTANCE_MIN_KM: "0.0"
+      DISTANCE_MAX_KM: "0.15"
+      # Greenness objective under hard constraints ("weighted" restores the
+      # earlier 0.5/0.3/0.2 score). The two sites are ~145 m apart, so a 100 m
+      # service radius puts a UE beside one edge outside the other's area,
+      # while a UE between them is served by both and greenness decides.
+      SELECTION_MODEL: "constrained"
+      SERVICE_RADIUS_KM: "0.1"
+    ports: ["8011:8011"]
+    depends_on:
+      - backend
+      - camara-location
+      - energy-telemetry
+    networks: [drift-net]
+
+  # ETSI GS MEC 021 Application Mobility Service — northbound interface.
+  mec021-api:
+    build: ./mec/mec021-api
+    container_name: drift-mec021-api
+    restart: unless-stopped
+    environment:
+      DRIFT_CONTROLLER_URL: http://drift-controller:8011
+      # O-2 event-driven trigger: subscribe to the ENVELOPE pQoS notification
+      # API at startup; degradation events for UE_IMSI initiate autonomous
+      # MEC-021 mobility procedures (threshold calibrated to the demo app).
+      PQOS_SUB_URL: http://10.220.2.49:8001
+      PQOS_SINK_BASE: http://10.220.3.20:8010/pqos-events
+      UE_IMSI: "999700123456785"
+      # BELOW-threshold for the per-AMS pQoS subscription. With H-PQOS-I the
+      # prediction is the device's usable capacity (~76-82 Mbps healthy), so
+      # 4.0 fires only when the network genuinely cannot carry the app's flow —
+      # no idle-UE false alarms (an idle UE still has capacity).
+      PQOS_METHOD: "H-PQOS-I"
+      PQOS_THRESHOLD_DL_MBPS: "4.0"
+      # E2E_LATENCY/ABOVE is the trigger; THROUGHPUT_DL/BELOW the backstop.
+      # H-PQOS-I has no latency support, hence the second method.
+      PQOS_METHOD_LATENCY: "SIMPLE-QS-PQOS-I"
+      PQOS_THRESHOLD_LAT_MS: "200.0"
+      PQOS_SUB_TYPES: "latency,throughput"
+    ports: ["8010:8010"]
+    depends_on:
+      - drift-controller
+    networks: [drift-net]
+
+  # ── pgAdmin (optional — start with: docker compose --profile tools up) ───────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: drift-pgadmin
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - drift-net
+    profiles: [tools]

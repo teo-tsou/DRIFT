@@ -1,0 +1,19 @@
+# Global configuration
+kubeconfig_path: /etc/rancher/k3s/k3s.yaml  # Adjust for RKE2 if needed
+kubectl_command: kubectl
+
+# Longhorn configuration
+longhorn_data_path: /var/lib/longhorn
+longhorn_replicas: 2
+
+# Networking defaults
+default_bridge_name: br0
+network_wait_timeout: 300
+
+# KubeVirt configuration
+kubevirt_namespace: kubevirt
+cdi_namespace: cdi
+
+# Timeouts
+service_wait_timeout: 600
+pod_ready_timeout: 300

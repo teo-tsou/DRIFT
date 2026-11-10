@@ -1,0 +1,63 @@
+---
+# Note: Longhorn and Monitoring may run in parallel during provisioning.
+# We wait for Longhorn's namespace to appear rather than failing immediately.
+
+- name: Wait for Longhorn namespace to appear (up to 5 minutes)
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get namespace longhorn-system --no-headers 2>/dev/null | wc -l
+  register: longhorn_ns_check
+  until: longhorn_ns_check.stdout | trim != "0"
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+
+- name: Warn if Longhorn namespace not found (will use local-path as fallback)
+  debug:
+    msg: "WARNING: Longhorn namespace not found after waiting. Monitoring may use local-path storage."
+  when: longhorn_ns_check.stdout | trim == "0"
+
+- name: Get cluster node count
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes --no-headers 2>/dev/null | wc -l
+  register: node_count_raw
+  changed_when: false
+  failed_when: false
+
+- name: Calculate optimal Longhorn replica count
+  set_fact:
+    node_count: "{{ node_count_raw.stdout | trim | int | default(1) }}"
+    optimal_replica_count: "{{ [node_count_raw.stdout | trim | int | default(1), 3] | min }}"
+
+- name: Display cluster information
+  debug:
+    msg:
+      - "Detected {{ node_count }} nodes in cluster"
+      - "Setting Longhorn replica count to {{ optimal_replica_count }}"
+
+- name: Update Longhorn default replica count
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml patch setting default-replica-count \
+      -n longhorn-system \
+      --type merge \
+      -p "{\"value\":\"{{ optimal_replica_count }}\"}" 2>/dev/null || true
+  changed_when: false
+  failed_when: false
+  when: longhorn_ns_check.stdout | trim != "0"
+
+- name: Check available storage classes
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get storageclass --no-headers 2>/dev/null | awk '{print $1}'
+  register: storage_classes
+  changed_when: false
+  failed_when: false
+
+- name: Display available storage classes
+  debug:
+    msg: "Available storage classes: {{ storage_classes.stdout_lines }}"
+
+- name: Use local-path as fallback if Longhorn storage class not available
+  set_fact:
+    prometheus_storage_class: "local-path"
+    alertmanager_storage_class: "local-path"
+  when: prometheus_storage_class not in (storage_classes.stdout_lines | default([]))

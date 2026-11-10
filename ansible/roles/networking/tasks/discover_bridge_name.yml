@@ -1,0 +1,29 @@
+---
+- name: Create bridge configurations from L2 networks and interface mappings
+  set_fact:
+    node_bridge_configs: >-
+      {%- set configs = [] -%}
+      {%- for mapping in interface_mappings | default([]) -%}
+        {%- for network_name, network_config in l2_networks.items() -%}
+          {%- if network_name == mapping.l2_network -%}
+            {%- set _ = configs.append({
+              'interface': mapping.interface,
+              'vlan_id': network_config.vlan_id,
+              'bridge_name': network_config.bridge_name,
+              'l2_network': network_name,
+              'subnet': network_config.subnet,
+              'gateway': network_config.gateway
+            }) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ configs }}
+
+- name: Set primary bridge name (first bridge for compatibility)
+  set_fact:
+    bridge_name: "{{ node_bridge_configs[0].bridge_name }}"
+  when: node_bridge_configs | length > 0
+
+- name: Debug bridge configuration
+  debug:
+    msg: "Node {{ inventory_hostname }} will create bridges: {{ node_bridge_configs | map(attribute='bridge_name') | list }}"

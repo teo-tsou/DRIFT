@@ -1,0 +1,16 @@
+---
+# Lightweight RWX storage for labs without Longhorn: an NFS export on one host
+# + the nfs-subdir-external-provisioner in every cluster, publishing a single
+# ReadWriteMany StorageClass. KubeVirt DataVolume-backed VMs need RWX to be
+# live-migratable, so this class is the minimum storage for the VM migration
+# rig when Longhorn (the full-fat default, enable_longhorn) is not deployed.
+#
+# The backend selects the class via DRIFT_VM_STORAGE_CLASS (defaults to
+# longhorn-rwx); set it to `nfs_storage_class` when using this role.
+
+nfs_storage_class: drift-nfs
+nfs_storage_server: ""            # host that exports the share (e.g. 10.0.1.84)
+nfs_storage_path: /srv/drift-vols # export directory on that server
+nfs_storage_export_net: 10.0.1.0/24
+nfs_storage_kubeconfig: /etc/rancher/k3s/k3s.yaml
+nfs_provisioner_image: registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2

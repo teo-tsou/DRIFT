@@ -1,0 +1,33 @@
+---
+# Prepare a PAIR of DRIFT edge clusters for KubeVirt decentralized
+# cross-cluster live migration.
+#
+# Run against a group `xcluster_pair` containing exactly two cluster server
+# nodes. Each host must set (in inventory):
+#   ansible_host      : the node IP (also used as the peer route next-hop)
+#   cluster_pod_cidr  : that cluster's pod CIDR
+#   peer_host         : inventory hostname of the other cluster's server
+#   sync_endpoint_ip  : (optional) peer sync pod IP for a reachability probe
+#
+#   ansible-playbook -i inventories/xcluster/hosts.yml \
+#       playbooks/prepare_xcluster_migration.yml
+#
+# virt-operator stays running throughout (required for CA merge + live sync
+# addresses). Idempotent: safe to re-run (e.g. as a CA-rotation refresh).
+
+- name: Prepare edge cluster pair for cross-cluster live migration
+  hosts: xcluster_pair
+  become: true
+  gather_facts: false
+  vars:
+    ansible_ssh_pipelining: true
+  # See setup_evpn_l2.yml: force PATH + ensure the k3s kubectl symlink so the
+  # role's many bare `kubectl` calls resolve on every node (avoids rc 127).
+  environment:
+    PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  pre_tasks:
+    - name: Ensure kubectl is available (k3s symlink)
+      shell: command -v kubectl >/dev/null 2>&1 || ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
+      changed_when: false
+  roles:
+    - xcluster_migration

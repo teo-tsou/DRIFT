@@ -1,0 +1,24 @@
+---
+# EVPN stretched-L2 across an edge cluster pair (for cross-cluster VM IP
+# continuity). Runs on the two cluster server nodes; each host must define
+# `ansible_host` (its underlay IP) and `peer_host` (the other node).
+#
+# Reference design: KubeVirt "Dedicated migration network / Stretched layer-2".
+# There it is driven by OpenPERouter against a BGP fabric; here (a flat 2-node
+# lab with no spine/leaf) FRR peers the two nodes directly over the underlay.
+
+evpn_bgp_as: 65000            # single AS -> iBGP between the two nodes
+evpn_vni: 10666               # L2VNI carrying the stretched segment
+evpn_bridge: br-drift         # the stretched-L2 bridge the VM NAD attaches to
+evpn_vxlan_dev: vx-drift
+evpn_underlay_dstport: 4789   # standard VXLAN UDP port
+evpn_overlay_mtu: 1400        # VM-side MTU (underlay 1500 - VXLAN headroom)
+evpn_overlay_subnet: "192.170.10.0/24"   # informational; guests set static IPs here
+
+# ── attachment layer: the CNI + NetworkAttachmentDefinition the VM binds to ──
+# A no-IPAM `bridge` CNI plugs the VM's secondary NIC straight onto br-drift, so
+# the guest keeps whatever static IP it configured across a cross-cluster move.
+evpn_cni_plugins_version: "v1.5.1"
+evpn_nad_name: drift-evpn
+evpn_nad_namespace: default
+evpn_kubeconfig: /etc/rancher/k3s/k3s.yaml

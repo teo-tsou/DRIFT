@@ -1,0 +1,1433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DRIFT — Distributed Edge Migration Platform</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23161b22'/><text x='16' y='23' font-family='system-ui,sans-serif' font-size='18' font-weight='700' fill='%23cdd9e5' text-anchor='middle'>D</text></svg>">
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --sidebar-w: 220px;
+            --bg: #0d1117;
+            --surface: #161b22;
+            --surface-2: #1c2330;
+            --border: #30363d;
+            --accent: #4493f8;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --text: #cdd9e5;
+            --text-2: #8b949e;
+            --text-muted: #8b949e;
+            --radius: 6px;
+            --font: system-ui, -apple-system, sans-serif;
+            --mono: ui-monospace, 'SF Mono', monospace;
+        }
+
+        html, body { height: 100%; font-family: var(--font); color: var(--text); background: var(--bg); overflow: hidden; font-size: 14px; }
+
+        /* ── Layout ── */
+        .app { display: flex; height: 100vh; overflow: hidden; }
+
+        /* ── Sidebar ── */
+        .sidebar {
+            width: var(--sidebar-w);
+            flex-shrink: 0;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .sidebar-brand {
+            height: 52px;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+        .sidebar-logo-mark {
+            width: 30px; height: 30px; border-radius: 6px;
+            background: transparent; border: 1.5px solid #444c56;
+            display: flex; align-items: center; justify-content: center;
+            font-size: .75em; font-weight: 700; color: var(--text);
+            flex-shrink: 0; font-family: var(--mono); letter-spacing: -.5px;
+        }
+        .sidebar-name { font-size: 1.1em; font-weight: 700; color: var(--text); letter-spacing: .04em; }
+
+        .sidebar-nav { flex: 1; padding: 10px 8px; display: flex; flex-direction: column; gap: 1px; overflow-y: auto; }
+
+        .nav-section-label {
+            font-size: .65em; font-weight: 600; color: var(--text-2);
+            letter-spacing: .08em; text-transform: uppercase;
+            padding: 12px 10px 5px;
+        }
+        .nav-section-label:first-child { padding-top: 4px; }
+
+        .nav-item {
+            display: flex; align-items: center; gap: 9px;
+            padding: 7px 10px; border-radius: var(--radius);
+            cursor: pointer; color: var(--text-2);
+            font-size: .85em; font-weight: 500;
+            text-decoration: none; user-select: none;
+            transition: background .1s, color .1s;
+        }
+        .nav-item:hover { background: var(--surface-2); color: var(--text); }
+        .nav-item.active { background: var(--surface-2); color: var(--text); border-left: 2px solid var(--accent); }
+        .nav-item.active svg { color: var(--accent); }
+        .nav-item svg { opacity: .6; flex-shrink: 0; }
+        .nav-item.active svg { opacity: 1; }
+        .nav-item-badge {
+            margin-left: auto; font-size: .72em; font-family: var(--mono);
+            color: var(--text-2); background: var(--bg); border: 1px solid var(--border);
+            padding: 0 6px; border-radius: 10px;
+        }
+
+        .sidebar-footer {
+            padding: 12px 16px; border-top: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .sidebar-status { display: flex; align-items: center; gap: 6px; font-size: .75em; color: var(--text-2); }
+        .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+        .sidebar-version { font-size: .7em; color: var(--text-2); font-family: var(--mono); }
+
+        /* ── Main ── */
+        .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+        .topbar {
+            height: 48px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; padding: 0 24px; gap: 10px;
+            background: var(--surface); flex-shrink: 0;
+        }
+        .topbar-breadcrumb { display: flex; align-items: center; gap: 5px; font-size: .82em; color: var(--text-2); }
+        .topbar-breadcrumb .sep { opacity: .4; }
+        .topbar-breadcrumb .current { color: var(--text); font-weight: 500; }
+        .topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+        .content { flex: 1; overflow-y: auto; padding: 24px 28px; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
+        /* ── Sections ── */
+        .section { display: none; }
+        .section.active { display: block; }
+
+        .page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; gap: 12px; }
+        .page-header h1 { font-size: 1.15em; font-weight: 600; color: var(--text); }
+        .page-header p { font-size: .8em; color: var(--text-2); margin-top: 2px; }
+        .page-header-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+        /* ── Buttons ── */
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 7px 14px; background: #21262d; color: var(--text);
+            border: 1px solid #444c56; border-radius: var(--radius);
+            font-size: .82em; font-weight: 500; font-family: var(--font);
+            cursor: pointer; transition: background .12s, border-color .12s; white-space: nowrap;
+        }
+        .btn:hover { background: #2d333b; border-color: #636e7b; }
+        .btn:disabled { opacity: .35; cursor: not-allowed; }
+        .btn-ghost { background: transparent; color: var(--text-2); border: 1px solid var(--border); }
+        .btn-ghost:hover { color: var(--text); background: var(--surface-2); border-color: #444c56; }
+        .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+        .btn-danger:hover { background: rgba(248,81,73,.08); }
+        .btn-sm { padding: 4px 10px; font-size: .78em; }
+
+
+        /* ── Sites list ── */
+        .sites-list-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 20px; }
+        .sites-list-header { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: .72em; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .06em; display: flex; align-items: center; justify-content: space-between; }
+
+        .site-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+        .site-row:last-child { border-bottom: none; }
+        .site-row:hover { background: var(--surface-2); }
+        .site-row-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--text-2); }
+        .site-row-info { flex: 1; min-width: 0; }
+        .site-row-name { font-size: .88em; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .site-row-sub  { font-size: .72em; color: var(--text-2); margin-top: 1px; }
+        .site-row-count { font-size: .72em; font-family: var(--mono); color: var(--text-2); flex-shrink: 0; }
+
+        /* ── Cluster tree ── */
+        .cluster-tree { display: flex; flex-direction: column; gap: 18px; }
+        .site-group-header { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 2px; }
+        .site-group-name { font-size: .7em; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-2); }
+        .site-group-loc  { font-size: .72em; color: var(--text-2); }
+        .site-group-count { margin-left: auto; font-size: .68em; font-family: var(--mono); color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); padding: 0 7px; border-radius: 10px; }
+
+        .cr { display: flex; align-items: center; gap: 12px; padding: 9px 12px; border-radius: var(--radius); }
+        .cr:hover { background: var(--surface-2); }
+        .cr-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .cr-info { flex: 1; min-width: 0; }
+        .cr-name { font-size: .9em; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .cr-meta { font-size: .72em; color: var(--text-2); margin-top: 1px; }
+        .cr-nodes { font-size: .78em; font-family: var(--mono); color: var(--text-2); white-space: nowrap; flex-shrink: 0; }
+        .cr-nodes .nr { color: var(--success); }
+        .cr-version { font-size: .7em; font-family: var(--mono); color: var(--text-2); white-space: nowrap; flex-shrink: 0; }
+        .cr-addons { display: flex; gap: 4px; flex-shrink: 0; }
+        .cr-addon { font-size: .65em; font-weight: 500; padding: 1px 6px; border-radius: 4px; border: 1px solid; opacity: .8; }
+        .cr-actions { display: flex; gap: 4px; flex-shrink: 0; }
+        .cr-sub { padding: 0 12px 8px 32px; }
+        .cr-sub-label { font-size: .72em; color: var(--text-2); margin-top: 4px; }
+
+        .cluster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+        .cluster-item { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+        .cluster-item.status-active { border-left: 2px solid var(--success); }
+        .cluster-item.status-failed  { border-left: 2px solid var(--danger); }
+        .cluster-item.status-degraded { border-left: 2px solid var(--warning); }
+        .cluster-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+        .cluster-name { font-size: .95em; font-weight: 600; color: var(--text); }
+        .cluster-meta { font-size: .72em; color: var(--text-2); margin-top: 2px; }
+        .cluster-details { font-size: .8em; color: var(--text-2); margin-bottom: 10px; line-height: 1.6; }
+
+        /* ── Status badges ── */
+        .status-badge { font-size: .7em; font-weight: 600; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; flex-shrink: 0; }
+        .status-active      { background: rgba(63,185,80,.12);  color: var(--success); }
+        .status-provisioning, .status-installing_addons, .status-configuring_network { background: rgba(210,153,34,.1); color: var(--warning); }
+        .status-failed      { background: rgba(248,81,73,.12); color: var(--danger); }
+        .status-degraded    { background: rgba(210,153,34,.12); color: var(--warning); }
+        .status-deleting    { background: rgba(248,81,73,.08); color: var(--danger); }
+        .status-pending     { background: rgba(99,102,241,.1); color: #818cf8; }
+
+        /* ── Progress bar ── */
+        .progress-bar { height: 2px; background: var(--border); border-radius: 1px; margin: 6px 0; overflow: hidden; }
+        .progress-fill { height: 100%; border-radius: 1px; background: var(--accent); transition: width .4s; }
+        .progress-fill.deleting { background: var(--danger); }
+        .progress-indeterminate { width: 40% !important; animation: progress-slide 1.4s ease-in-out infinite; }
+        @keyframes progress-slide { 0% { transform: translateX(-150%); } 100% { transform: translateX(350%); } }
+
+        /* ── Addon/node pills ── */
+        .nodes-row { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+        .node-pill { display: inline-flex; align-items: center; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px; font-size: .72em; font-family: var(--mono); color: var(--text-2); }
+        .node-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text-2); flex-shrink: 0; }
+        .node-dot.ready { background: var(--success); }
+        .node-dot.not-ready { background: var(--danger); }
+        .addon-row { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0; }
+        .addon-pill { font-size: .68em; padding: 1px 7px; border-radius: 4px; font-weight: 500; border: 1px solid; }
+        .addon-ok      { background: rgba(63,185,80,.08);  color: var(--success); border-color: rgba(63,185,80,.2); }
+        .addon-degraded { background: rgba(210,153,34,.08); color: var(--warning); border-color: rgba(210,153,34,.2); }
+        .addon-missing { background: rgba(248,81,73,.08);  color: var(--danger);  border-color: rgba(248,81,73,.2); }
+
+        .cluster-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+        .cluster-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+        .cluster-sync { font-size: .68em; color: var(--text-2); font-family: var(--mono); }
+
+        /* ── Forms ── */
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+        .card-title { font-size: .9em; font-weight: 600; color: var(--text); margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .section-label { font-size: .7em; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .08em; margin: 16px 0 8px; }
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; font-size: .8em; font-weight: 500; color: var(--text-2); margin-bottom: 4px; }
+        .form-group small { display: block; font-size: .72em; color: var(--text-2); margin-top: 3px; }
+        input[type="text"], input[type="number"], input[type="password"], input[type="email"], select, textarea {
+            width: 100%; padding: 7px 10px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: var(--radius);
+            color: var(--text); font-size: .85em; font-family: var(--font); outline: none;
+        }
+        input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+        select option { background: var(--surface); }
+        textarea { resize: vertical; min-height: 80px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+        /* ── Alerts ── */
+        .alert { padding: 9px 12px; border-radius: var(--radius); font-size: .82em; margin-bottom: 10px; border: 1px solid; }
+        .alert-success { background: rgba(63,185,80,.06);  color: var(--success); border-color: rgba(63,185,80,.2); }
+        .alert-error   { background: rgba(248,81,73,.06);  color: var(--danger);  border-color: rgba(248,81,73,.2); }
+        .alert-info    { background: rgba(56,189,248,.06); color: #7dd3fc;        border-color: rgba(56,189,248,.2); }
+        .alert-warning { background: rgba(210,153,34,.06); color: var(--warning); border-color: rgba(210,153,34,.2); }
+
+        /* ── Node cards ── */
+        .node-card, .ovn-net-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 8px; position: relative; }
+        .node-card h3 { font-size: .8em; font-weight: 600; color: var(--text-2); margin-bottom: 10px; text-transform: uppercase; letter-spacing: .05em; }
+        .remove-node-btn { position: absolute; top: 10px; right: 10px; background: transparent; border: 1px solid var(--danger); color: var(--danger); padding: 2px 8px; border-radius: 4px; font-size: .72em; cursor: pointer; }
+        .remove-node-btn:hover { background: rgba(248,81,73,.08); }
+
+        /* ── Logs ── */
+        .logs-container { background: var(--bg); color: var(--text-2); padding: 14px; border-radius: var(--radius); max-height: 480px; overflow-y: auto; font-family: var(--mono); font-size: .78em; border: 1px solid var(--border); }
+        .log-entry { padding: 4px 0; border-bottom: 1px solid var(--border); line-height: 1.5; }
+        .log-entry:last-child { border-bottom: none; }
+        .log-timestamp { color: var(--text-2); margin-right: 8px; }
+        .log-level-INFO    { color: var(--success); }
+        .log-level-WARNING { color: var(--warning); }
+        .log-level-ERROR   { color: var(--danger); }
+        .log-level-DEBUG   { color: var(--text-2); }
+
+        /* ── Spinner ── */
+        .loading { display: flex; align-items: center; gap: 10px; color: var(--text-2); font-size: .85em; padding: 28px 0; justify-content: center; }
+        .spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ── Empty state ── */
+        .empty-state { text-align: center; padding: 48px 24px; color: var(--text-2); }
+        .empty-state-title { font-size: .9em; font-weight: 600; color: var(--text-2); margin-bottom: 5px; }
+        .empty-state-desc { font-size: .8em; line-height: 1.6; }
+
+        .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+        .interface-mappings-container { margin-top: 8px; }
+
+        @media (max-width: 900px) {
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 600px) {
+            .sidebar { display: none; }
+        }
+
+        /* Site edit modal */
+        .site-modal-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,.55); backdrop-filter: blur(3px);
+            z-index: 1000; align-items: center; justify-content: center;
+        }
+        .site-modal-overlay.open { display: flex; }
+        .site-modal {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; padding: 28px; width: 420px; max-width: 95vw;
+        }
+        .site-modal h3 { margin: 0 0 20px; font-size: 1em; font-weight: 600; }
+        .site-modal .form-group { margin-bottom: 14px; }
+        .site-modal label { display: block; font-size: .78em; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin-bottom: 5px; }
+        .site-modal input { width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; color: var(--text); font-size: .88em; }
+        .site-modal input:focus { outline: none; border-color: var(--accent); }
+        .site-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+        .site-modal-coord-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        /* Addon toggle cards */
+        .addon-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+        .addon-card {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 14px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--surface);
+            cursor: pointer; transition: border-color .15s, background .15s;
+            user-select: none;
+        }
+        .addon-card:has(input:checked) {
+            border-color: rgba(99,102,241,.5);
+            background: rgba(99,102,241,.06);
+        }
+        .addon-card input[type=checkbox] { display: none; }
+        .addon-check {
+            width: 16px; height: 16px; border-radius: 4px;
+            border: 1.5px solid var(--border); background: var(--bg);
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; transition: background .15s, border-color .15s;
+        }
+        .addon-card:has(input:checked) .addon-check {
+            background: var(--accent); border-color: var(--accent);
+        }
+        .addon-check-mark { display: none; color: #fff; font-size: 10px; font-weight: 700; }
+        .addon-card:has(input:checked) .addon-check-mark { display: block; }
+        .addon-header { display: flex; align-items: center; gap: 8px; }
+        .addon-title { font-size: .85em; font-weight: 600; color: var(--text); }
+        .addon-desc { font-size: .75em; color: var(--text-muted); line-height: 1.45; }
+        .addon-card:has(input:not(:checked)) .addon-title,
+        .addon-card:has(input:not(:checked)) .addon-desc { opacity: .55; }
+        @media (max-width: 700px) { .addon-cards { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<div class="app">
+
+    <!-- ── Sidebar ──────────────────────────────────────── -->
+    <aside class="sidebar">
+        <div class="sidebar-brand" onclick="showSection('sites')" style="cursor:pointer;">
+            <div class="sidebar-logo-mark">DR</div>
+            <div class="sidebar-name">DRIFT</div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <div class="nav-section-label">Infrastructure</div>
+
+            <a class="nav-item active" data-section="followme" onclick="showSection('followme')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/><path d="M19 5l-2.5 2.5M7.5 16.5L5 19M19 19l-2.5-2.5M7.5 7.5L5 5"/></svg>
+                Follow-Me
+            </a>
+
+            <a class="nav-item" data-section="xedge" onclick="showSection('xedge')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 17h14l-1.5-5h-11z"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/><path d="M12 12V6m-3 2l3-3 3 3"/></svg>
+                Extreme Edge
+            </a>
+
+            <a class="nav-item" data-section="ues" onclick="showSection('ues')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
+                UEs
+                <span class="nav-item-badge" id="badge-ues">—</span>
+            </a>
+
+            <a class="nav-item" data-section="sites" onclick="showSection('sites')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                Sites
+                <span class="nav-item-badge" id="badge-sites">—</span>
+            </a>
+
+            <a class="nav-item" data-section="clusters" onclick="showSection('clusters')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                Edge Clusters
+                <span class="nav-item-badge" id="badge-clusters">—</span>
+            </a>
+
+            <a class="nav-item" data-section="xcluster" onclick="showSection('xcluster')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/><line x1="9" y1="12" x2="15" y2="12"/></svg>
+                Cross-Cluster Migration
+            </a>
+
+            <a class="nav-item" data-section="newsite" onclick="showSection('newsite')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/><line x1="12" y1="3" x2="12" y2="1"/><line x1="18" y1="5" x2="19.5" y2="3.5"/></svg>
+                New Site
+            </a>
+
+<a class="nav-item" data-section="deploy" onclick="showSection('deploy')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+                Deploy Edge Cluster
+            </a>
+
+            <div class="nav-section-label">API</div>
+
+            <a class="nav-item" data-section="mec" onclick="showSection('mec')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+                MEC API
+            </a>
+
+            <a class="nav-item" data-section="settings" onclick="showSection('settings')">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                Settings
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="sidebar-status">
+                <div class="status-dot"></div>
+                <span>Online</span>
+            </div>
+            <span class="sidebar-version">v0.1</span>
+        </div>
+    </aside>
+
+    <!-- ── Main content ──────────────────────────────────── -->
+    <div class="main">
+
+        <!-- Topbar -->
+        <div class="topbar">
+            <div class="topbar-breadcrumb">
+                <span onclick="showSection('sites')" style="cursor:pointer;">DRIFT</span>
+                <span class="sep">/</span>
+                <span class="current" id="topbar-current">Sites</span>
+            </div>
+            <div class="topbar-actions" id="topbar-actions"></div>
+        </div>
+
+        <!-- Scrollable content -->
+        <div class="content">
+
+            <!-- ══════════════════════════════
+                 FOLLOW-ME  (live demo dashboard)
+            ══════════════════════════════ -->
+            <section id="section-followme" class="section active">
+                <div class="page-header">
+                    <div>
+                        <h1>Follow-Me</h1>
+                        <p>Energy- &amp; QoS-aware edge migration — the workload chasing the best edge</p>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <span id="fm-refresh-dot" style="width:8px;height:8px;border-radius:50%;background:#2e9e4f;"></span>
+                        <span style="color:var(--text-muted);font-size:.8em;">live</span>
+                    </div>
+                </div>
+
+                <!-- KPI cards -->
+                <div id="fm-kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:16px;"></div>
+
+                <!-- Follow-Me stage: edge clusters on top, the real UE (big phone) centered,
+                     dynamic arrows from the UE up to the edge currently serving the app -->
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-title">Follow-Me — UE &amp; edge clusters
+                        <span id="fm-ue-imsi" style="font-size:.8em;font-weight:600;color:var(--text-muted);font-family:var(--mono);">IMSI —</span>
+                    </div>
+                    <div id="fm-stage" style="position:relative;display:flex;flex-direction:column;align-items:center;padding-top:4px;">
+                        <!-- edge clusters across the top -->
+                        <div id="fm-edges" style="display:flex;gap:64px;justify-content:center;align-items:stretch;width:100%;flex-wrap:wrap;z-index:2;min-height:96px;">
+                            <div class="loading"><div class="spinner"></div> Loading…</div>
+                        </div>
+                        <!-- dynamic UE -> serving-edge arrows -->
+                        <svg id="fm-stage-svg" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1;overflow:visible;"></svg>
+                        <!-- the real UE (big phone) centered below -->
+                        <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:20px;align-items:start;width:100%;">
+                        <!-- Left of the UE: the app's own cumulative frame counter. A restart
+                             would drop it to zero; a live migration keeps it climbing with a
+                             plateau whose width IS the freeze. This is the seamlessness proof. -->
+                        <div id="fm-frm-panel" style="justify-self:start;width:100%;min-width:300px;max-width:560px;margin-top:150px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-sizing:border-box;">
+                            <div id="fm-frm-title" style="font-size:.84em;font-weight:600;">Application state continuity</div>
+                            <div style="display:flex;align-items:baseline;gap:9px;margin-top:4px;">
+                                <span id="fm-frm-now" style="font-size:2.1em;font-weight:700;font-family:var(--mono);line-height:1.05;">&mdash;</span>
+                                <span id="fm-frm-unit" style="font-size:.72em;color:var(--text-muted);">frames processed</span>
+                                <span id="fm-frm-stat" style="font-size:.72em;color:var(--text-muted);margin-left:auto;font-family:var(--mono);">&mdash;</span>
+                            </div>
+                            <canvas id="fm-frm-canvas" style="width:100%;height:158px;display:block;margin-top:8px;"></canvas>
+                            <div style="font-size:.67em;color:var(--text-muted);margin-top:7px;line-height:1.5;">
+                                <span id="fm-frm-note">The app&rsquo;s own counter, read over the UE path. It never restarts from zero, so the
+                                process moved rather than relaunched.</span>
+                                <span style="color:#9085e9;">&#9608;</span> migration &nbsp;
+                                <span style="color:#c98500;">&#9608;</span> frozen &nbsp;
+                                <span style="color:var(--danger);">&#9608;</span> counter reset
+                            </div>
+                        </div>
+                        <div id="fm-phone" style="margin-top:80px;width:258px;height:538px;background:#000;border-radius:38px;border:11px solid #1c1c1e;box-shadow:0 10px 38px rgba(0,0,0,.5);position:relative;flex-shrink:0;z-index:2;">
+                            <div style="position:absolute;top:13px;left:50%;transform:translateX(-50%);width:66px;height:7px;background:#0a0a0a;border-radius:7px;z-index:4;"></div>
+                            <video id="fm-video" style="width:100%;height:100%;object-fit:cover;border-radius:28px;background:#000;display:block;" autoplay muted loop playsinline></video>
+                            <img id="fm-cam" alt="" style="width:100%;height:100%;object-fit:contain;border-radius:28px;background:#000;display:none;">
+                            <img id="fm-stamp" alt="" style="position:absolute;top:7%;left:50%;transform:translateX(-50%);width:78%;max-width:648px;border-radius:6px;opacity:.92;z-index:3;pointer-events:none;display:none;">
+                            <!-- camera-style date/time INSIDE the video, at the BOTTOM; freezes at the migration cutover -->
+                            <div id="fm-ts" style="position:absolute;bottom:0;left:0;right:0;display:none;align-items:center;gap:7px;z-index:3;pointer-events:none;font-family:var(--mono);padding:22px 16px 16px;border-radius:0 0 26px 26px;background:linear-gradient(0deg,rgba(0,0,0,.72),rgba(0,0,0,0));">
+                                <span id="fm-ts-rec" style="width:10px;height:10px;border-radius:50%;background:#ff3b30;box-shadow:0 0 8px #ff3b30;flex-shrink:0;"></span>
+                                <span id="fm-ts-txt" style="font-size:.8em;color:#fff;text-shadow:0 1px 3px #000;white-space:nowrap;">—</span>
+                                <span id="fm-ts-tag" style="margin-left:auto;font-size:.6em;font-weight:700;color:#fff;background:rgba(192,57,43,.92);padding:2px 7px;border-radius:6px;display:none;white-space:nowrap;">● MIGRATING</span>
+                            </div>
+                            <div id="fm-video-buffer" style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);border-radius:28px;flex-direction:column;gap:8px;">
+                                <div class="spinner"></div>
+                                <span style="font-size:.75em;color:#fff;">buffering…</span>
+                            </div>
+                            <!-- fallback: live 5G/PQoS status when no stream is playing -->
+                            <div id="fm-video-fallback" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:linear-gradient(160deg,#0b1220,#12263b);border-radius:28px;padding:18px;text-align:center;">
+                                <div style="font-size:.72em;letter-spacing:.06em;text-transform:uppercase;color:#7fa8d8;">UE · 5G (wwan0)</div>
+                                <div id="fm-fb-signal" style="display:flex;align-items:flex-end;gap:3px;height:30px;"></div>
+                                <div><div id="fm-fb-tput" style="font-size:1.7em;font-weight:700;color:#fff;font-family:var(--mono);">—</div><div style="font-size:.66em;color:#9fb4cc;">Mbps down</div></div>
+                                <div><div id="fm-fb-lat" style="font-size:1.2em;font-weight:600;color:#fff;font-family:var(--mono);">—</div><div style="font-size:.66em;color:#9fb4cc;">ms latency</div></div>
+                                <div id="fm-fb-quality" style="font-size:.85em;font-weight:700;">—</div>
+                                <div style="font-size:.64em;color:#7fa8d8;">live PQoS — no stream loaded</div>
+                            </div>
+                            <div id="fm-video-state" style="position:absolute;bottom:70px;left:50%;transform:translateX(-50%);font-size:.7em;font-family:var(--mono);background:rgba(0,0,0,.55);color:#fff;padding:2px 10px;border-radius:10px;z-index:3;">—</div>
+                            <div id="fm-path-badge" title="" style="position:absolute;top:10px;left:50%;transform:translateX(-50%);font-size:.62em;font-weight:700;color:#fff;padding:3px 9px;border-radius:9px;z-index:4;white-space:nowrap;background:rgba(0,0,0,.6);"></div>
+                        </div>
+                        <!-- Live UE -> app latency. This is the user-perspective KPI: what the
+                             phone actually waits for, sampled across the migration. The threshold
+                             rule mirrors the pQoS max-latency setting, so the audience sees the
+                             same number that arms the trigger. -->
+                        <div id="fm-lat-panel" style="justify-self:end;width:100%;min-width:300px;max-width:560px;margin-top:150px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-sizing:border-box;">
+                            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;">
+                                <div style="font-size:.84em;font-weight:600;">UE &rarr; app round-trip latency</div>
+                                <label style="font-size:.7em;color:var(--text-muted);display:flex;align-items:center;gap:5px;cursor:pointer;">
+                                    <input id="fm-lat-run" type="checkbox" checked style="width:auto;margin:0;"> live
+                                </label>
+                            </div>
+                            <div style="display:flex;align-items:baseline;gap:9px;margin-top:4px;">
+                                <span id="fm-lat-now" style="font-size:2.1em;font-weight:700;font-family:var(--mono);line-height:1.05;">&mdash;</span>
+                                <span id="fm-lat-unit" style="font-size:.72em;color:var(--text-muted);">ms</span>
+                                <span id="fm-lat-stat" style="font-size:.72em;color:var(--text-muted);margin-left:auto;font-family:var(--mono);">&mdash;</span>
+                            </div>
+                            <canvas id="fm-lat-canvas" style="width:100%;height:158px;display:block;margin-top:8px;cursor:crosshair;"></canvas>
+                            <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
+                                <span style="font-size:.67em;color:var(--text-muted);white-space:nowrap;">watching</span>
+                                <input id="fm-lat-target" list="fm-lat-targets" style="flex:1;min-width:0;font-size:.72em;padding:3px 6px;font-family:var(--mono);" placeholder="(UE path)">
+                                <datalist id="fm-lat-targets">
+                                    <option value="http://10.220.3.30:9000/health">yolo via the hub relay</option>
+                                    <option value="http://10.220.3.20:9101/stamp">video pod</option>
+                                    <option value="http://10.220.3.21:9000/">demo-vm</option>
+                                </datalist>
+                            </div>
+                            <div style="font-size:.67em;color:var(--text-muted);margin-top:7px;line-height:1.5;">
+                                <span id="fm-lat-note">Sampled from this browser.</span>
+                                <span style="color:#9085e9;">&#9608;</span> migration in flight &nbsp;
+                                <span style="color:var(--danger);">&#9608;</span> no response
+                            </div>
+                        </div>
+                        </div>
+                        <div style="font-size:.74em;color:var(--text-muted);margin-top:12px;text-align:center;max-width:520px;">
+                            The UE streams the app running at the <span style="color:#2e9e4f;font-weight:600;">● serving edge</span>. The video plays from the pod's RAM — on a migration the floating IP <em>and</em> the in-memory state follow the pod, so playback resumes on the new edge exactly where it froze.
+                        </div>
+                    </div>
+                    <!-- controls -->
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+                        <button id="fm-mode-file" class="btn btn-sm" onclick="fmSetMode('file')">🎬 Video file</button>
+                        <button id="fm-mode-cam" class="btn btn-sm btn-ghost" onclick="fmSetMode('cam')">📹 Live cam (MJPEG)</button>
+                        <input id="fm-video-url" type="text" list="fm-video-urls" style="width:320px;max-width:60vw;" placeholder="pick an app or paste a URL">
+                        <datalist id="fm-video-urls">
+                            <option value="http://10.220.3.30:9000/stream">YOLO perception (pod) — MJPEG</option>
+                            <option value="http://10.220.3.20:9101/loop.webm">Video streaming (pod) — lab only</option>
+                            <option value="http://10.220.3.21:9000/loop.webm">Video streaming (VM)</option>
+                        </datalist>
+                        <button class="btn btn-sm" onclick="fmSetVideo()">Load</button>
+                        <button class="btn btn-sm btn-ghost" onclick="fmApplyStream(true)">Reconnect</button>
+                        <button id="fm-mute" class="btn btn-sm btn-ghost" onclick="fmToggleMute()">🔇 Unmute</button>
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
+                    <!-- UE QoS -->
+                    <div class="card">
+                        <div class="card-title">UE — 5G QoS (PQoS predictions)</div>
+                        <div id="fm-ue">—</div>
+                        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+                            <div style="font-size:.72em;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);margin-bottom:8px;">pQoS thresholds</div>
+                            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                                <label style="font-size:.72em;color:var(--text-muted);">Min DL capacity (Mbps)<br><input id="fm-pq-dl" type="number" min="0" step="0.5" style="width:90px;margin-top:3px;" value="4"></label>
+                                <label style="font-size:.72em;color:var(--text-muted);">Min UL capacity (Mbps)<br><input id="fm-pq-ul" type="number" min="0" step="0.5" style="width:90px;margin-top:3px;" value="2"></label>
+                                <label style="font-size:.72em;color:var(--text-muted);">Max predicted latency (ms)<br><input id="fm-pq-lat" type="number" min="1" style="width:100px;margin-top:3px;" value="400"></label>
+                                <button class="btn btn-sm" onclick="fmApplyPqos()">Apply</button>
+                            </div>
+                            <div id="fm-pq-msg" style="font-size:.76em;color:var(--text-muted);margin-top:8px;min-height:1em;"></div>
+                        </div>
+                        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+                            <div style="font-size:.72em;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);margin-bottom:8px;">Autonomous relocation</div>
+                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                <span id="fm-at-state" style="font-size:.78em;font-weight:700;padding:3px 9px;border-radius:10px;background:var(--surface-2);color:var(--text-muted);">&mdash;</span>
+                                <button id="fm-at-btn" class="btn btn-sm" onclick="fmToggleAutoTrigger()">&hellip;</button>
+                                <label style="font-size:.74em;color:var(--text-muted);display:flex;align-items:center;gap:5px;">source
+                                    <select id="fm-at-mode" onchange="fmSetTriggerMode(this.value)" style="width:auto;padding:2px 6px;font-size:1em;">
+                                        <option value="poll">live polling</option>
+                                        <option value="notify">AF notifications</option>
+                                        <option value="both">both</option>
+                                    </select></label>
+                            </div>
+                            <div style="font-size:.72em;color:var(--text-muted);margin-top:6px;line-height:1.45;">When armed, a pQoS notification that breaks a registered app&rsquo;s requirement starts a MEC-021 procedure on its own &mdash; no target, no click. One at a time, 90&nbsp;s cooldown per app.</div>
+                        </div>
+                    </div>
+                    <!-- Current decision -->
+                    <div class="card">
+                        <div class="card-title">Optimal Edge Selection — last decision</div>
+                        <div id="fm-decision">—</div>
+                    </div>
+                    <!-- Application (live probe of the workload) -->
+                    <div class="card">
+                        <div class="card-title">Edge Applications</div>
+                        <div id="fm-app">—</div>
+                    </div>
+                    <!-- UE data path: the active UE profile's relays -> 5G -> hub relay -> floating IP -->
+                    <div class="card">
+                        <div class="card-title" style="display:flex;align-items:center;gap:8px;">
+                            UE data path
+                            <button class="btn btn-sm btn-ghost" style="margin-left:auto;" onclick="fmUePathRepair(this)">⟳ Repair relays</button>
+                        </div>
+                        <div id="fm-uepath">—</div>
+                    </div>
+                </div>
+
+                <div class="section-label" style="margin-top:20px;">Migrations</div>
+                <div id="fm-migrations" class="cluster-tree">
+                    <div class="loading"><div class="spinner"></div> Loading…</div>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 EXTREME EDGE  (vehicle Jetson <-> ARM edge)
+            ══════════════════════════════ -->
+            <section id="section-xedge" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>Extreme Edge</h1>
+                        <p>The vehicle as UE and as edge: the dashcam's YOLO lives on the car or on the network edge, and moves live over 5G</p>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <span id="xe-refresh-dot" style="width:8px;height:8px;border-radius:50%;background:#2e9e4f;"></span>
+                        <span style="color:var(--text-muted);font-size:.8em;">live</span>
+                    </div>
+                </div>
+
+                <div id="xe-kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:16px;"></div>
+
+                <!-- Stage, as on Follow-Me: the edge on top, the vehicle UE (big phone) centered,
+                     an arrow from the UE up to the edge when YOLO runs there; when the vehicle
+                     serves itself the phone turns green. Left: the app's frame counter. Right:
+                     the round trip from the vehicle to wherever YOLO runs. -->
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-title">Extreme Edge — vehicle UE &amp; edge
+                        <span id="xe-imsi" style="font-size:.8em;font-weight:600;color:var(--text-muted);font-family:var(--mono);">IMSI 999700000000020</span>
+                    </div>
+                    <div id="xe-stage" style="position:relative;display:flex;flex-direction:column;align-items:center;padding-top:4px;">
+                        <div id="xe-edges" style="display:flex;gap:64px;justify-content:center;align-items:stretch;width:100%;flex-wrap:wrap;z-index:2;min-height:96px;">
+                            <div class="loading"><div class="spinner"></div> Loading…</div>
+                        </div>
+                        <svg id="xe-stage-svg" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1;overflow:visible;"></svg>
+                        <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:20px;align-items:start;width:100%;">
+                            <div style="justify-self:start;width:100%;min-width:230px;max-width:380px;margin-top:210px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-sizing:border-box;">
+                                <div style="font-size:.84em;font-weight:600;">5G uplink &amp; QoD</div>
+                                <div style="display:flex;align-items:baseline;gap:9px;margin-top:4px;">
+                                    <span id="xe-ul-now" style="font-size:1.6em;font-weight:700;font-family:var(--mono);line-height:1.05;">&mdash;</span>
+                                    <span style="font-size:.72em;color:var(--text-muted);">Mbit/s up</span>
+                                    <span id="xe-ul-stat" style="font-size:.72em;color:var(--text-muted);margin-left:auto;font-family:var(--mono);">&mdash;</span>
+                                </div>
+                                <canvas id="xe-ul-canvas" style="width:100%;height:118px;display:block;margin-top:8px;"></canvas>
+                                <div style="font-size:.67em;color:var(--text-muted);margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                                    <span style="color:#e6edf3;">&#9472;</span> uplink &nbsp;<span style="color:#6e7681;">&#9472;</span> down &nbsp;<span id="xe-ul-pq-key" style="color:#d29922;">&#9476; pQoS</span> &nbsp;<span style="color:#d29922;opacity:.6;">&#9608;</span> QoD &nbsp;<span style="color:#9085e9;">&#9608;</span> migration
+                                </div>
+                            </div>
+                            <!-- The vehicle UE as its own interior: windshield and road, the dashcam by
+                                 the mirror (the arrow starts there), and a Tesla-style centre tablet
+                                 showing where YOLO runs. The tablet is HTML over the SVG scene. -->
+                            <div id="xe-phone" style="margin-top:60px;width:640px;height:556px;position:relative;flex-shrink:0;z-index:2;">
+                                <svg viewBox="0 0 470 360" style="position:absolute;left:0;top:0;width:640px;height:490px;border-radius:18px;overflow:hidden;" aria-hidden="true">
+                                    <defs>
+                                        <linearGradient id="xe-sky" x1="0" y1="0" x2="0" y2="1">
+                                            <stop id="xe-sky-0" offset="0" stop-color="#0e1a2b"/><stop id="xe-sky-1" offset=".62" stop-color="#1d3550"/><stop id="xe-sky-2" offset=".66" stop-color="#151b23"/><stop id="xe-sky-3" offset="1" stop-color="#11161d"/>
+                                        </linearGradient>
+                                        <linearGradient id="xe-dash" x1="0" y1="0" x2="0" y2="1">
+                                            <stop offset="0" stop-color="#1b2028"/><stop offset="1" stop-color="#0c0f14"/>
+                                        </linearGradient>
+                                        <radialGradient id="xe-horizon" cx=".5" cy="0" r=".6">
+                                            <stop offset="0" stop-color="#3b6ea5" stop-opacity=".35"/><stop offset="1" stop-color="#3b6ea5" stop-opacity="0"/>
+                                        </radialGradient>
+                                    </defs>
+                                    <rect width="470" height="360" fill="#0a0d12"/>
+                                    <!-- windshield with the road ahead -->
+                                    <polygon points="62,18 408,18 452,182 18,182" fill="url(#xe-sky)"/>
+                                    <ellipse cx="235" cy="112" rx="200" ry="40" fill="url(#xe-horizon)"/>
+                                    <polygon points="226,112 244,112 392,182 78,182" fill="#171c24"/>
+                                    <line x1="235" y1="114" x2="235" y2="122" stroke="#c9d1d9" stroke-opacity=".5" stroke-width="1.2"/>
+                                    <line x1="235" y1="130" x2="235" y2="146" stroke="#c9d1d9" stroke-opacity=".5" stroke-width="1.8"/>
+                                    <line x1="235" y1="160" x2="235" y2="182" stroke="#c9d1d9" stroke-opacity=".5" stroke-width="2.6"/>
+                                    <line x1="228" y1="112" x2="110" y2="182" stroke="#c9d1d9" stroke-opacity=".25" stroke-width="1"/>
+                                    <line x1="242" y1="112" x2="360" y2="182" stroke="#c9d1d9" stroke-opacity=".25" stroke-width="1"/>
+                                    <!-- A-pillars and roof -->
+                                    <polygon points="0,0 470,0 470,10 408,18 62,18 0,10" fill="#07090d"/>
+                                    <polygon points="0,10 62,18 18,182 0,196" fill="#0b0e13"/>
+                                    <polygon points="470,10 408,18 452,182 470,196" fill="#0b0e13"/>
+                                    <!-- rear-view mirror and the dashcam -->
+                                    <line x1="235" y1="10" x2="235" y2="24" stroke="#1d232b" stroke-width="4"/>
+                                    <rect x="200" y="22" width="70" height="20" rx="7" fill="#151a21" stroke="#262d36"/>
+                                    <g id="xe-dashcam">
+                                        <rect x="276" y="24" width="24" height="16" rx="4" fill="#111419" stroke="#2f3742"/>
+                                        <circle cx="288" cy="32" r="4.5" fill="#05070a" stroke="#3a4552"/>
+                                        <circle id="xe-dashcam-led" cx="296" cy="27" r="1.6" fill="#ff3b30"/>
+                                    </g>
+                                    <!-- dashboard -->
+                                    <path d="M0,196 C120,176 350,176 470,196 L470,360 L0,360 Z" fill="url(#xe-dash)"/>
+                                    <path d="M0,196 C120,176 350,176 470,196" fill="none" stroke="#2a313b" stroke-width="1.5"/>
+                                    <!-- steering wheel -->
+                                    <circle cx="96" cy="318" r="68" fill="none" stroke="#1f252d" stroke-width="15"/>
+                                    <circle cx="96" cy="318" r="68" fill="none" stroke="#2c343e" stroke-width="2"/>
+                                    <path d="M40,330 L80,316 M152,330 L112,316 M96,334 L96,372" stroke="#1f252d" stroke-width="12" stroke-linecap="round"/>
+                                    <circle cx="96" cy="318" r="20" fill="#181d24" stroke="#2c343e"/>
+                                    <!-- tablet mount -->
+                                    <rect x="305" y="330" width="30" height="30" rx="4" fill="#12161c"/>
+                                </svg>
+                                <div id="xe-veh-energy" style="position:absolute;left:0;right:0;top:498px;display:grid;grid-template-columns:auto 1fr 1fr;gap:16px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:8px 14px;"></div>
+                                <div id="xe-tablet" style="position:absolute;left:242px;top:240px;width:387px;height:218px;border-radius:12px;border:3px solid #23292f;background:linear-gradient(160deg,#0b1220,#101d2e);box-shadow:0 8px 24px rgba(0,0,0,.6);transition:box-shadow .4s,border-color .4s;overflow:hidden;">
+                                    <!-- what the passenger sees: YOLO's annotated dashcam view, fetched from
+                                         the vehicle through the drift-yolo-view relay -->
+                                    <img id="xe-cam" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none;transition:filter .3s;">
+                                    <div id="xe-phone-badge" style="position:absolute;top:9px;left:50%;transform:translateX(-50%);font-size:.7em;font-weight:700;color:#fff;padding:2px 8px;border-radius:8px;white-space:nowrap;background:rgba(0,0,0,.6);"></div>
+                                    <div id="xe-phone-body" style="position:absolute;inset:0;padding:28px 12px 8px;"></div>
+                                </div>
+                            </div>
+                            <div style="justify-self:end;width:100%;min-width:230px;max-width:380px;margin-top:210px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-sizing:border-box;">
+                                <div style="font-size:.84em;font-weight:600;">Vehicle &rarr; YOLO round-trip latency</div>
+                                <div style="display:flex;align-items:baseline;gap:9px;margin-top:4px;">
+                                    <span id="xe-lat-now" style="font-size:1.6em;font-weight:700;font-family:var(--mono);line-height:1.05;">&mdash;</span>
+                                    <span style="font-size:.72em;color:var(--text-muted);">ms</span>
+                                    <span id="xe-lat-stat" style="font-size:.72em;color:var(--text-muted);margin-left:auto;font-family:var(--mono);">&mdash;</span>
+                                </div>
+                                <canvas id="xe-lat-canvas" style="width:100%;height:118px;display:block;margin-top:8px;"></canvas>
+                                <div style="font-size:.67em;color:var(--text-muted);margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                                    Ping to YOLO. &nbsp;<span style="color:#9085e9;">&#9608;</span> migration &nbsp;<span style="color:var(--danger);">&#9608;</span> no response
+                                </div>
+                            </div>
+                        </div>
+                        <div id="xe-stage-note" style="font-size:.74em;color:var(--text-muted);margin-top:12px;text-align:center;max-width:560px;"></div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center;margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+                        <button id="xe-move-edge" class="btn btn-sm" onclick="xeMove('edge')">&#8679; Move YOLO to the edge</button>
+                        <button id="xe-move-vehicle" class="btn btn-sm" onclick="xeMove('vehicle')">&#8681; Move YOLO to the vehicle</button>
+                        <span id="xe-move-msg" style="font-size:.78em;color:var(--text-muted);"></span>
+                        <span style="width:1px;height:20px;background:var(--border);margin:0 6px;"></span>
+                        <span style="font-size:.74em;color:var(--text-muted);">scenario time</span>
+                        <span id="xe-clock" style="display:inline-flex;gap:4px;"></span>
+                        <span style="font-size:.74em;color:var(--text-muted);margin-left:6px;">edge greenness</span>
+                        <button id="xe-src-profile" class="btn btn-sm btn-ghost" onclick="xeScenario({edge_source:'profile'})">profile</button>
+                        <button id="xe-src-ecb" class="btn btn-sm btn-ghost" onclick="xeScenario({edge_source:'ecb'})">ECB live</button>
+                        <span style="font-size:.74em;color:var(--text-muted);margin-left:6px;">vehicle greenness</span>
+                        <button id="xe-vsrc-ecb" class="btn btn-sm btn-ghost" onclick="xeScenario({vehicle_source:'ecb'})" title="Green share of the EV battery's last charge, real Tesla data from ECB">ECB (Tesla)</button>
+                        <button id="xe-vsrc-cfg" class="btn btn-sm btn-ghost" onclick="xeScenario({vehicle_source:'configured'})">configured</button>
+                        <span style="width:1px;height:20px;background:var(--border);margin:0 6px;"></span>
+                        <span style="font-size:.74em;color:var(--text-muted);">dashcam drive</span>
+                        <button id="xe-scene-day" class="btn btn-sm btn-ghost" onclick="xeScene('day')">&#9728; Day</button>
+                        <button id="xe-scene-afternoon" class="btn btn-sm btn-ghost" onclick="xeScene('afternoon')">&#9788; Afternoon</button>
+                        <button id="xe-scene-night" class="btn btn-sm btn-ghost" onclick="xeScene('night')">&#9790; Night</button>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                        Scenario autopilot
+                        <span style="margin-left:auto;display:flex;gap:6px;">
+                            <button id="xe-auto" class="btn btn-sm btn-ghost" onclick="xeEngineSet({enabled: !_xeEngine.enabled})" title="Let DRIFT decide where YOLO runs: greenness, pQoS, QoD">Autopilot: off</button>
+                            <button id="xe-degrade" class="btn btn-sm btn-ghost" onclick="xeEngineSet({degrade: !_xeEngine.degrade})" title="Demo lever: treat the pQoS prediction as degraded">Simulate pQoS degradation</button>
+                            <button id="xe-congest" class="btn btn-sm btn-ghost" onclick="xeCongest()" title="Emulate a congested 5G uplink on the vehicle: the camera flow and the RTT probes share a 3 Mbit/s queue (tc on wwan0)">Congest the 5G uplink</button>
+                            <button class="btn btn-sm btn-ghost" onclick="xeEngineSet({clear_events: true})" title="Clear the decision log and the chart markers">Clear log</button>
+                        </span>
+                    </div>
+                    <div id="xe-engine-status" style="font-size:.8em;color:var(--text-2);margin-bottom:6px;">—</div>
+                    <div id="xe-engine-log" style="font-size:.78em;font-family:var(--mono);max-height:150px;overflow:auto;"></div>
+                </div>
+
+                <div class="card" style="margin-bottom:16px;">
+                    <div class="card-title" style="display:flex;align-items:center;gap:8px;">
+                        ENVELOPE APIs: pQoS and QoD calls
+                        <span style="margin-left:auto;font-size:.72em;font-weight:400;color:var(--text-muted);">as sent and answered; click a call for its JSON</span>
+                    </div>
+                    <div id="xe-api-log" style="font-size:.78em;font-family:var(--mono);max-height:260px;overflow:auto;"><span style="color:var(--text-muted);">no calls yet</span></div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;">
+                    <div class="card">
+                        <div class="card-title">Vehicle UE — 5G QoS (pQoS predictions)</div>
+                        <div id="xe-pqos">—</div>
+                        <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+                            <div style="font-size:.72em;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);margin-bottom:8px;">pQoS thresholds (this UE)</div>
+                            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+                                <label style="font-size:.72em;color:var(--text-muted);">Min DL (Mbps)<br><input id="xe-pq-dl" type="number" min="0" step="0.5" style="width:80px;margin-top:3px;"></label>
+                                <label style="font-size:.72em;color:var(--text-muted);">Min UL (Mbps)<br><input id="xe-pq-ul" type="number" min="0" step="0.5" style="width:80px;margin-top:3px;"></label>
+                                <label style="font-size:.72em;color:var(--text-muted);">Max latency (ms)<br><input id="xe-pq-lat" type="number" min="1" style="width:90px;margin-top:3px;"></label>
+                                <button class="btn btn-sm" onclick="xeApplyThresholds()">Apply</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Quality on Demand — vehicle &harr; edge</div>
+                        <div id="xe-qod">—</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+                            <select id="xe-qod-profile" style="width:auto;">
+                                <option value="QOS_E">QOS_E</option><option value="QOS_S">QOS_S</option>
+                                <option value="QOS_M">QOS_M</option><option value="QOS_L" selected>QOS_L</option>
+                            </select>
+                            <input id="xe-qod-dur" type="number" min="30" step="30" value="300" style="width:80px;" title="duration (s)">
+                            <button class="btn btn-sm" onclick="xeQodRequest()">Request</button>
+                            <span id="xe-qod-msg" style="font-size:.76em;color:var(--text-muted);"></span>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Vehicle 5G link</div>
+                        <div id="xe-link">—</div>
+                    </div>
+                </div>
+
+                <div class="section-label" style="margin-top:20px;">Vehicle &harr; edge migrations</div>
+                <div id="xe-migrations" class="cluster-tree">
+                    <div class="loading"><div class="spinner"></div> Loading…</div>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 UEs (5G devices)
+            ══════════════════════════════ -->
+            <section id="section-ues" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>User Equipment</h1>
+                        <p>5G devices: follow-me traffic endpoints today, extreme-edge hosts later</p>
+                    </div>
+                    <div class="page-header-actions">
+                        <button class="btn btn-secondary" onclick="loadUes()">Refresh</button>
+                    </div>
+                </div>
+
+                <div id="ues-list" class="cluster-tree">
+                    <div class="loading"><div class="spinner"></div> Loading…</div>
+                </div>
+
+                <div class="card" style="margin-top:18px;max-width:640px;">
+                    <h3 style="margin-bottom:12px;">Add UE</h3>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                        <div class="form-group"><label>Name</label>
+                            <input type="text" id="ue-name" placeholder="ncsrd-ue2"></div>
+                        <div class="form-group"><label>Management IP (ssh)</label>
+                            <input type="text" id="ue-host" placeholder="10.220.2.128"></div>
+                        <div class="form-group"><label>SSH user</label>
+                            <input type="text" id="ue-user" value="pi"></div>
+                        <div class="form-group"><label>5G interface</label>
+                            <input type="text" id="ue-iface" placeholder="wwan0 / wwu1i4"></div>
+                        <div class="form-group"><label>5G gateway <span style="color:var(--text-muted);font-weight:400;">(blank = dev route)</span></label>
+                            <input type="text" id="ue-gw" placeholder="10.45.0.16"></div>
+                        <div class="form-group"><label>Notes</label>
+                            <input type="text" id="ue-notes" placeholder="optional"></div>
+                    </div>
+                    <small style="display:block;color:var(--text-muted);margin:2px 0 10px;">
+                        Prerequisites: hub's SSH key authorized on the device; socat + python3 installed;
+                        the SIM provisioned in the 5G core. The IMSI is read from the SIM afterwards, never typed.
+                    </small>
+                    <div id="ue-add-error" style="color:var(--danger);font-size:.82em;min-height:1.1em;margin-bottom:8px;"></div>
+                    <button class="btn" id="ue-add-btn" onclick="ueAdd()">Add UE</button>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 SITES
+            ══════════════════════════════ -->
+            <section id="section-sites" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>Sites</h1>
+                        <p>Physical deployment locations for edge clusters</p>
+                    </div>
+                    <div class="page-header-actions">
+                        <button class="btn" onclick="showSection('newsite')">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            New Site
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Sites list -->
+                <div class="sites-list-card">
+                    <div class="sites-list-header">
+                        <span>Registered Sites</span>
+                        <span id="sites-list-count" style="font-family:var(--mono);font-size:.7em;color:var(--text-muted);"></span>
+                    </div>
+                    <div id="sites-list">
+                        <div class="loading"><div class="spinner"></div> Loading…</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 CLUSTERS
+            ══════════════════════════════ -->
+            <section id="section-clusters" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>Edge Clusters</h1>
+                    </div>
+                    <div class="page-header-actions">
+                        <button class="btn" onclick="showSection('deploy')">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            Deploy Cluster
+                        </button>
+                    </div>
+                </div>
+
+                <div id="cluster-list" class="cluster-tree">
+                    <div class="loading"><div class="spinner"></div> Loading clusters…</div>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 CROSS-CLUSTER MIGRATION
+            ══════════════════════════════ -->
+            <section id="section-xcluster" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>Cross-Cluster Migration</h1>
+                        <p>Wire edge clusters together so VMs and pods can live-migrate between them</p>
+                    </div>
+                </div>
+
+                <div class="card" style="max-width:560px;">
+                    <div class="card-title">Wire the cross-cluster mesh</div>
+                    <p style="color:var(--text-muted);font-size:.85em;line-height:1.55;margin:0 0 14px;">
+                        Select the clusters that should live-migrate between each other. Wiring builds a
+                        full mesh — every selected cluster peers with every other (EVPN stretched-L2 for
+                        VM IP continuity + routes to all peer pod-CIDRs + CA-trust union +
+                        decentralized-migration gate). It's idempotent: add a cluster later and re-wire
+                        with the full set. Kubeconfigs and the node-agent token are already in place from
+                        provisioning.
+                    </p>
+                    <div id="mesh-cluster-picker" style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px;">
+                        <div class="loading"><div class="spinner"></div> Loading clusters…</div>
+                    </div>
+                    <div id="pair-modal-error" style="color:var(--danger);font-size:.82em;min-height:1.1em;margin:2px 0 10px;"></div>
+                    <div id="pair-progress-body" style="display:none;margin:0 0 12px;">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <div class="spinner"></div>
+                            <span id="pair-progress-text" style="font-size:.88em;">Starting…</span>
+                        </div>
+                    </div>
+                    <button class="btn" id="pair-submit-btn" onclick="submitMesh()">Wire Cross-Cluster Mesh</button>
+                </div>
+
+                <div class="section-label" style="margin-top:24px;">Mesh Wiring Runs</div>
+                <div id="pairings-list" class="cluster-tree">
+                    <div class="loading"><div class="spinner"></div> Loading…</div>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 MEC API  (ETSI MEC-021 follow-me trigger)
+            ══════════════════════════════ -->
+            <section id="section-mec" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>MEC API</h1>
+                        <p>Trigger an ETSI MEC-021 Application Mobility relocation — the follow-me flow</p>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-bottom:20px;">
+                    <div class="card-title">Step 1 &mdash; Application Mobility Services
+                        <button class="btn btn-sm btn-ghost" onclick="mecLoadAms()">Refresh</button>
+                    </div>
+                    <p style="color:var(--text-muted);font-size:.83em;line-height:1.55;margin:0 0 12px;">
+                        A registration is long-lived: it declares an application for mobility and, for the UE it
+                        names, opens the pQoS subscription that lets degradation events drive relocation on their
+                        own. Procedures in step 2 are fired <em>against</em> a registration. Deregister what you
+                        are no longer demoing &mdash; every extra AMS turns each pQoS event into another procedure.
+                    </p>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px;">
+                        <div>
+                            <div style="font-size:.72em;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);margin-bottom:6px;">Edge applications</div>
+                            <div style="font-size:.72em;color:var(--text-muted);margin-bottom:6px;line-height:1.45;">Set what each app <b>needs</b> on its row &mdash; max latency (ms), min downlink (Mbps), blank = platform default &mdash; then <b>Register</b>. Those numbers arm that app&rsquo;s own pQoS subscriptions, so a degradation moves only the apps it actually breaks.</div>
+                            <div id="mec-apps-list" style="font-size:.85em;">&mdash;</div>
+                        </div>
+                        <div>
+                            <div style="font-size:.72em;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);margin-bottom:6px;">Registered (AMS)</div>
+                            <div style="font-size:.72em;color:var(--text-muted);margin-bottom:6px;line-height:1.45;">Register as many as you like &mdash; each one is monitored. The radio only picks which registration <b>step 2</b> reuses, so it does not mint a new AMS each time.</div>
+                            <div id="mec-ams-list" style="font-size:.85em;">&mdash;</div>
+                        </div>
+                    </div>
+                    <div id="mec-ams-msg" style="font-size:.78em;color:var(--text-muted);margin-top:10px;min-height:1.1em;"></div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:20px;align-items:start;">
+                    <!-- ── Trigger form ─────────────────────────── -->
+                    <div class="card">
+                        <div class="card-title">Step 2 &mdash; Trigger a mobility procedure</div>
+                        <p style="color:var(--text-muted);font-size:.83em;line-height:1.55;margin:0 0 14px;">
+                            Fires a mobility procedure against a registration. Pick one above to reuse it; with
+                            none selected this registers a fresh AMS first, which is fine for a one-off but leaves
+                            a registration behind. Optimal Edge Selection picks the target, or honours the one you pin.
+                        </p>
+
+                        <div style="display:flex;gap:8px;margin-bottom:14px;">
+                            <button class="btn btn-ghost" style="flex:1;" onclick="mecPreset('pod')">Pod example</button>
+                            <button class="btn btn-ghost" style="flex:1;" onclick="mecPreset('vm')">VM example</button>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Workload kind</label>
+                            <select id="mec-kind" onchange="mecRenderCurl()">
+                                <option value="pod">pod — CRIU container (post-copy)</option>
+                                <option value="vm">vm — KubeVirt VM (decentralized)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Source cluster</label>
+                            <select id="mec-source" onchange="mecRenderCurl()">
+                                <option value="">Loading clusters…</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Workload name</label>
+                            <input type="text" id="mec-workload" placeholder="my-app" oninput="mecRenderCurl()">
+                            <small>Pod name (pod kind) or VirtualMachine name (vm kind).</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Namespace</label>
+                            <input type="text" id="mec-namespace" value="default" oninput="mecRenderCurl()">
+                        </div>
+                        <div class="form-group">
+                            <label>App ID <span style="color:var(--text-muted);font-weight:400;">(optional)</span></label>
+                            <input type="text" id="mec-appid" placeholder="defaults to workload name" oninput="mecRenderCurl()">
+                        </div>
+                        <div class="form-group">
+                            <label>UE IMSI <span style="color:var(--text-muted);font-weight:400;">(optional — arms pQoS monitoring for this UE)</span></label>
+                            <input type="text" id="mec-ue-imsi" placeholder="blank = platform default (correct for this testbed)" list="mec-ue-imsi-list" oninput="mecRenderCurl()">
+                            <datalist id="mec-ue-imsi-list">
+                                <option value="999700000000020">vehicle-ue &mdash; vehicle Jetson, wwan0 10.45.0.45 &mdash; the active demo UE</option>
+                                <option value="999700123456785">ncsrd-ue1 &mdash; Pi, 10.220.2.187 &mdash; retired</option>
+                            </datalist>
+                        </div>
+                        <div class="form-group">
+                            <label>Target cluster <span style="color:var(--text-muted);font-weight:400;">(optional — blank = auto-select)</span></label>
+                            <select id="mec-target" onchange="mecRenderCurl()">
+                                <option value="">Auto (Optimal Edge Selection)</option>
+                            </select>
+                        </div>
+
+                        <div id="mec-error" style="color:var(--danger);font-size:.82em;min-height:1.1em;margin:2px 0 10px;"></div>
+                        <button class="btn" id="mec-submit-btn" onclick="mecTrigger()">Trigger Migration</button>
+                    </div>
+
+                    <!-- ── Live result + examples ───────────────── -->
+                    <div style="display:flex;flex-direction:column;gap:20px;min-width:0;">
+                        <div class="card">
+                            <div class="card-title">Result</div>
+                            <div id="mec-result">
+                                <p style="color:var(--text-muted);font-size:.85em;margin:0;">
+                                    No procedure triggered yet. Fill the form and hit
+                                    <strong>Trigger Migration</strong> — decision and cutover status appear here live.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-title">Equivalent API calls</div>
+                            <p style="color:var(--text-muted);font-size:.83em;line-height:1.5;margin:0 0 12px;">
+                                The GUI proxies these through the backend so the browser stays same-origin.
+                                Against the raw MEC-021 service (<code id="mec-svc-url">:8010</code>) the flow is
+                                two calls — register the AMS, then start the procedure:
+                            </p>
+                            <pre id="mec-curl" style="background:var(--bg-code,#0d1117);color:#c9d1d9;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:.78em;line-height:1.5;margin:0;"></pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 NEW SITE
+            ══════════════════════════════ -->
+            <section id="section-newsite" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>New Site</h1>
+                        <p>Register a new physical edge location</p>
+                    </div>
+                </div>
+
+                <div class="card" style="max-width:520px;">
+                    <div class="card-title">Site Details</div>
+                    <div id="site-alert"></div>
+                    <form id="site-form">
+                        <div class="form-group">
+                            <label>Site Name *</label>
+                            <input type="text" id="site-name" required placeholder="Athens Edge Hub">
+                        </div>
+                        <div class="form-group">
+                            <label>Location</label>
+                            <input type="text" id="site-location" placeholder="Athens, Greece">
+                        </div>
+                        <div class="grid-2">
+                            <div class="form-group">
+                                <label>Latitude <small style="color:var(--text-muted);font-weight:400;">(optional)</small></label>
+                                <input type="number" id="site-lat" step="any" placeholder="37.9795">
+                            </div>
+                            <div class="form-group">
+                                <label>Longitude <small style="color:var(--text-muted);font-weight:400;">(optional)</small></label>
+                                <input type="number" id="site-lon" step="any" placeholder="23.7162">
+                            </div>
+                        </div>
+                        <hr class="divider">
+                        <div style="display:flex;gap:8px;">
+                            <button type="submit" class="btn">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                Create Site
+                            </button>
+                            <button type="button" class="btn btn-ghost" onclick="showSection('sites')">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 DEPLOY EDGE CLUSTER
+            ══════════════════════════════ -->
+            <section id="section-deploy" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>Deploy Edge Cluster</h1>
+                        <p>Provision a new K3s cluster with Longhorn storage and Multus networking pre-enabled. Optionally add KubeVirt for VM workloads.</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div id="create-alert"></div>
+                    <form id="cluster-form">
+                        <div class="grid-2">
+                            <div class="form-group">
+                                <label>Cluster Name *</label>
+                                <input type="text" id="cluster-name" required placeholder="volos-edge">
+                                <small>Must be unique across all sites</small>
+                            </div>
+                            <div class="form-group">
+                                <label>Site *</label>
+                                <select id="site-id" required>
+                                    <option value="">Select site…</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="grid-2">
+                            <div class="form-group">
+                                <label>Cluster Type</label>
+                                <select id="cluster-type">
+                                    <option value="k3s">K3s</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Kubernetes Version</label>
+                                <input type="text" id="k8s-version" placeholder="v1.34.5+k3s1" value="v1.34.5+k3s1">
+                                <small>Leave blank for default</small>
+                            </div>
+                        </div>
+
+                        <div class="grid-2">
+                            <div class="form-group">
+                                <label>Pod CIDR</label>
+                                <input type="text" id="pod-cidr" value="10.42.0.0/16" placeholder="10.42.0.0/16">
+
+                            </div>
+                            <div class="form-group">
+                                <label>Service CIDR</label>
+                                <input type="text" id="service-cidr" value="10.43.0.0/16" placeholder="10.43.0.0/16">
+                            </div>
+                        </div>
+                        <input type="hidden" id="cni-plugin" value="kube-ovn">
+                        <input type="checkbox" id="enable-monitoring" style="display:none">
+
+                        <input type="checkbox" id="enable-longhorn" checked style="display:none">
+                        <input type="checkbox" id="enable-multus" checked style="display:none">
+
+                        <div class="section-label" style="margin-top:8px;">Add-ons</div>
+                        <div class="addon-cards" style="grid-template-columns: 1fr;">
+                            <label class="addon-card">
+                                <input type="checkbox" id="enable-kubevirt" checked>
+                                <div class="addon-header">
+                                    <div class="addon-check"><span class="addon-check-mark">✓</span></div>
+                                    <span class="addon-title">Virtualization</span>
+                                </div>
+                                <div class="addon-desc">Deploy and manage VMs on bare-metal nodes. Required for VM Live Migration.</div>
+                            </label>
+                            <label class="addon-card">
+                                <input type="checkbox" id="enable-pod-migration" checked>
+                                <div class="addon-header">
+                                    <div class="addon-check"><span class="addon-check-mark">✓</span></div>
+                                    <span class="addon-title">Pod Live Migration</span>
+                                </div>
+                                <div class="addon-desc">Provision on CRI-O with CRIU + crun-drift + node-agent + macvlan, for container (pod) live migration. Uncheck for a containerd-only cluster (VMs only).</div>
+                            </label>
+                        </div>
+
+                        <div class="section-label">Nodes</div>
+                        <div id="nodes-container"></div>
+                        <button type="button" class="btn btn-ghost btn-sm" onclick="addNode()">+ Add Node</button>
+
+                        <hr class="divider">
+                        <button type="submit" class="btn" id="submit-btn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                            Deploy Edge Cluster
+                        </button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- ══════════════════════════════
+                 SETTINGS
+            ══════════════════════════════ -->
+            <section id="section-settings" class="section">
+                <div class="page-header">
+                    <div>
+                        <h1>Settings</h1>
+                        <p>API endpoint configuration and diagnostics</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">API Configuration</div>
+                    <div id="settings-alert"></div>
+                    <div class="form-group">
+                        <label>Backend API URL</label>
+                        <input type="text" id="api-url" placeholder="http://localhost:8000">
+                        <small>Auto-detected from current host. Override only if needed.</small>
+                    </div>
+                    <div style="display:flex;gap:8px;margin-top:4px;">
+                        <button class="btn" onclick="saveSettings()">Save</button>
+                        <button class="btn btn-ghost" onclick="checkHealth()">Test Connection</button>
+                    </div>
+                    <div id="health-result" style="margin-top:14px;"></div>
+                </div>
+            </section>
+
+        </div><!-- /content -->
+    </div><!-- /main -->
+</div><!-- /app -->
+
+
+<script>
+    /* ── Navigation ──────────────────────────────────────── */
+    function showSection(name) {
+        document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+        const sec = document.getElementById(`section-${name}`);
+        if (sec) sec.classList.add('active');
+
+        document.querySelectorAll('.nav-item[data-section]').forEach(el => {
+            el.classList.toggle('active', el.dataset.section === name);
+        });
+
+        const labels = {
+            sites: 'Sites', clusters: 'Edge Clusters', deploy: 'Deploy Edge Cluster',
+            newsite: 'New Site', networks: 'L2 Networks', settings: 'Settings',
+            xcluster: 'Cross-Cluster Migration', mec: 'MEC API', followme: 'Follow-Me', xedge: 'Extreme Edge',
+            ues: 'UEs',
+        };
+        const curr = document.getElementById('topbar-current');
+        if (curr) curr.textContent = labels[name] || name;
+
+        if (name === 'sites') loadSites();
+        if (name === 'ues') loadUes();
+        if (name === 'mec' && typeof mecLoadAms === 'function') mecLoadAms();
+        if (name === 'clusters') loadClusters();
+        if (name === 'xcluster') loadXcluster();
+        if (name === 'followme') loadFollowMe();
+        if (name === 'xedge' && typeof loadExtremeEdge === 'function') loadExtremeEdge();
+        if (name === 'mec') loadMec();
+        if (name === 'networks') loadNetworksSection();
+        if (name === 'deploy') {
+            loadSites();
+            if (!document.querySelector('.node-card')) { nodeCounter = 0; addNode(); }
+        }
+
+        localStorage.setItem('drift_section', name);
+    }
+
+    function switchTab(tab) {
+        const map = { list: 'clusters', sites: 'sites', create: 'deploy', networks: 'deploy', settings: 'settings' };
+        showSection(map[tab] || tab);
+    }
+    function goHome() { showSection('sites'); }
+
+    /* No-op stubs for app.js compatibility */
+    function openNewSitePanel() { showSection('newsite'); }
+    function closeNewSitePanel() { showSection('sites'); }
+    function loadEdgeApps() {}
+
+    /* ── Update sidebar badges ────────────────────────────── */
+    function _updateBadges(sitesCount, clustersCount) {
+        const bs = document.getElementById('badge-sites');
+        const bc = document.getElementById('badge-clusters');
+        if (bs && sitesCount != null) bs.textContent = sitesCount;
+        if (bc && clustersCount != null) bc.textContent = clustersCount;
+    }
+
+    /* ── Sidebar badge refresh ───────────────────────────── */
+    async function _refreshStats() {
+        try {
+            const base = localStorage.getItem('apiUrl')
+                || (location.hostname === 'localhost' ? 'http://localhost:8000' : `http://${location.hostname}:8000`);
+            const [sR, cR] = await Promise.all([
+                fetch(`${base}/api/v1/sites`).catch(() => null),
+                fetch(`${base}/api/v1/edge-clusters`).catch(() => null),
+            ]);
+            const sd = sR ? await sR.json().catch(() => ({ sites: [] }))    : { sites: [] };
+            const cd = cR ? await cR.json().catch(() => ({ clusters: [] })) : { clusters: [] };
+            _updateBadges((sd.sites || []).length, (cd.clusters || []).length);
+        } catch (_) {}
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const saved = localStorage.getItem('drift_section') || 'sites';
+        showSection(saved);
+        _refreshStats();
+
+        const siteForm = document.getElementById('site-form');
+        if (siteForm) {
+            siteForm.addEventListener('submit', () => {
+                setTimeout(() => {
+                    const alertEl = document.getElementById('site-alert');
+                    if (alertEl && alertEl.querySelector('.alert-success')) {
+                        setTimeout(() => showSection('sites'), 900);
+                    }
+                }, 400);
+            });
+        }
+    });
+
+    window.addEventListener('load', () => {
+        const origS = window.loadSites;
+        if (origS) {
+            window.loadSites = async function() {
+                await origS();
+                _refreshStats();
+            };
+        }
+
+        const origC = window.loadClusters;
+        if (origC) {
+            window.loadClusters = async function() {
+                await origC();
+                _refreshStats();
+            };
+        }
+
+        _patchLoadSites();
+        _refreshStats();
+    });
+
+    /* ── Patch loadSites to render compact site rows ────────── */
+    function _patchLoadSites() {
+        const sitesList = document.getElementById('sites-list');
+        if (!sitesList) return;
+
+        const observer = new MutationObserver(() => {
+            const items = sitesList.querySelectorAll('.cluster-item');
+            if (items.length === 0 && !sitesList.querySelector('.empty-state') && sitesList.innerHTML.includes('No sites')) {
+                sitesList.innerHTML = `
+                    <div class="empty-state" style="padding:32px 16px;">
+                        <div class="empty-state-title">No sites yet</div>
+                        <div class="empty-state-desc">Click <strong>New Site</strong> to add one.</div>
+                    </div>`;
+                const countEl = document.getElementById('sites-list-count');
+                if (countEl) countEl.textContent = '0';
+                return;
+            }
+            if (items.length > 0) {
+                const rows = [];
+                items.forEach(item => {
+                    const name    = item.querySelector('.cluster-name')?.textContent?.trim() || '';
+                    const details = item.querySelector('.cluster-details')?.innerHTML || '';
+                    const delBtn  = item.querySelector('.btn-danger')?.outerHTML || '';
+                    const loc     = _extractLoc(details);
+                    const coords  = _extractCoordsShort(details);
+                    rows.push({ name, loc, coords, delBtn });
+                });
+                if (rows.length === 0) return;
+
+                sitesList.innerHTML = rows.map(r => `
+                    <div class="site-row">
+                        <div class="site-row-dot" style="background:var(--success);box-shadow:0 0 5px var(--success)66;"></div>
+                        <div class="site-row-info">
+                            <div class="site-row-name">${r.name}</div>
+                            <div class="site-row-sub">${r.loc || r.coords || '—'}</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            ${r.coords ? `<span class="site-row-count">${r.coords}</span>` : ''}
+                            ${r.delBtn}
+                        </div>
+                    </div>`).join('');
+
+                const countEl = document.getElementById('sites-list-count');
+                if (countEl) countEl.textContent = rows.length;
+                _updateBadges(rows.length, null);
+            }
+        });
+        observer.observe(sitesList, { childList: true, subtree: false });
+    }
+
+    function _extractLoc(html) {
+        const m = html.match(/Location.*?<\/strong>\s*(.*?)<br>/s);
+        return m ? m[1].trim() : '';
+    }
+    function _extractCoordsShort(html) {
+        const m = html.match(/📍\s*([\d\.\-]+),\s*([\d\.\-]+)/);
+        if (!m) return '';
+        return `${parseFloat(m[1]).toFixed(2)}, ${parseFloat(m[2]).toFixed(2)}`;
+    }
+</script>
+<script src="app.js?v=20261031a"></script>
+<script src="xedge.js?v=20261031j"></script>
+
+<!-- Site edit modal -->
+<div class="site-modal-overlay" id="site-edit-modal">
+    <div class="site-modal">
+        <h3>Edit Site</h3>
+        <div id="site-edit-error" style="color:#f85149;font-size:.82em;margin-bottom:10px;display:none;"></div>
+        <input type="hidden" id="site-edit-id">
+        <div class="form-group">
+            <label>Location</label>
+            <input type="text" id="site-edit-location" placeholder="Athens, Greece">
+        </div>
+        <div class="site-modal-coord-row">
+            <div class="form-group">
+                <label>Latitude <small style="text-transform:none;font-weight:400;">(optional)</small></label>
+                <input type="number" id="site-edit-lat" step="any" placeholder="37.9795">
+            </div>
+            <div class="form-group">
+                <label>Longitude <small style="text-transform:none;font-weight:400;">(optional)</small></label>
+                <input type="number" id="site-edit-lon" step="any" placeholder="23.7162">
+            </div>
+        </div>
+        <div class="site-modal-actions">
+            <button class="btn btn-ghost" onclick="closeEditSiteModal()">Cancel</button>
+            <button class="btn" onclick="submitEditSite()">Save</button>
+        </div>
+    </div>
+</div>
+</body>
+</html>

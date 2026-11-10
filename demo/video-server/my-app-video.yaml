@@ -1,0 +1,157 @@
+# Migratable video-server pod — NO custom image / registry needed.
+# The work container is the base python:3-slim (already on every node). At start
+# it downloads a short Big Buck Bunny clip INTO MEMORY and serves it (with HTTP
+# range support) from RAM. That's CRIU-clean: after a cross-cluster blocking
+# checkpoint the restored process already holds the clip in its restored memory,
+# so the target (a fresh python:3-slim placeholder) needs no file/image/registry.
+# The floating IP 10.220.3.101 follows the pod, so the UE/proxy URL never changes.
+#
+# The dashboard draws a camera-style date/time OVER the video and freezes it at
+# the migration cutover (driven by DRIFT's migration state), so the "freeze then
+# resume on the new edge" is visible on a smoothly-playing file (no live-stream
+# buffering). Swap the clip with VIDEO_URL. NO runtimeClassName (cross-cluster
+# uses blocking CRIU under runc).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+  namespace: default
+  annotations:
+    k8s.v1.cni.cncf.io/networks: '[{"name":"macvlan-l2","interface":"net1","ips":["10.220.3.101/24"]}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: holder
+    image: docker.io/library/python:3-slim
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "infinity"]
+    resources:
+      requests: { cpu: "50m", memory: "64Mi" }
+  - name: work
+    image: docker.io/library/python:3-slim
+    imagePullPolicy: IfNotPresent
+    env:
+    # ~10 min Big Buck Bunny at 240p (~30 MB) — loaded fully into RAM so a CRIU
+    # migration carries the whole clip in the restored memory (the demo point:
+    # the target re-downloads nothing; RAM + the TCP socket are preserved).
+    - name: VIDEO_URL
+      value: "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.240p.vp9.webm"
+    command: ["python3", "-u", "-c"]
+    args:
+    - |
+      import http.server, socketserver, re, urllib.request, os
+      # The /stamp timestamp strip is rendered with the STDLIB ONLY (5x7 bitmap
+      # font -> PNG via zlib). No pip / Pillow: extra libraries bloat the CRIU
+      # checkpoint and a runtime pip install races the migration's target
+      # placeholder (a real failed-migration cause) — the pod must stay CRIU-clean.
+      import time, datetime, struct, zlib
+      # Try VIDEO_URL, then a couple of known-good bunny/sample hosts. A browser
+      # User-Agent is required — test-videos.co.uk 403s python-urllib's default UA.
+      URLS = [u for u in [os.environ.get("VIDEO_URL"),
+              "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4",
+              "https://download.samplelib.com/mp4/sample-10s.mp4"] if u]
+      DATA = None; CTYPE = "video/mp4"
+      for u in URLS:
+          try:
+              req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0 (DRIFT-edge)"})
+              DATA = urllib.request.urlopen(req, timeout=120).read()
+              CTYPE = "video/webm" if u.lower().endswith("webm") else "video/mp4"
+              print("loaded", u, len(DATA), "bytes", CTYPE, flush=True); break
+          except Exception as ex:
+              print("fetch failed", u, ex, flush=True)
+      if DATA is None:
+          raise SystemExit("no video source reachable from this edge")
+      F = {  # 5x7 bitmap font (rows of 5 bits) — just the glyphs the stamp needs
+          '0':[14,17,19,21,25,17,14],'1':[4,12,4,4,4,4,14],'2':[14,17,1,2,4,8,31],
+          '3':[31,2,4,2,1,17,14],'4':[2,6,10,18,31,2,2],'5':[31,16,30,1,1,17,14],
+          '6':[6,8,16,30,17,17,14],'7':[31,1,2,4,8,8,8],'8':[14,17,17,14,17,17,14],
+          '9':[14,17,17,15,1,2,12],':':[0,12,12,0,12,12,0],'-':[0,0,0,31,0,0,0],
+          '.':[0,0,0,0,0,12,12],' ':[0,0,0,0,0,0,0],
+          'D':[30,17,17,17,17,17,30],'R':[30,17,17,30,20,18,17],'I':[14,4,4,4,4,4,14],
+          'F':[31,16,16,30,16,16,16],'T':[31,4,4,4,4,4,4],
+          'p':[0,0,30,17,30,16,16],'o':[0,0,14,17,17,17,14],'d':[1,1,15,17,17,17,15]}
+      def _png(w, h, rows):
+          def ch(t, d):
+              c = t + d
+              return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
+          raw = b"".join(b"\x00" + r for r in rows)
+          return (b"\x89PNG\r\n\x1a\n"
+                  + ch(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                  + ch(b"IDAT", zlib.compress(raw)) + ch(b"IEND", b""))
+      def stamp_frame():
+          # thin timestamp strip to overlay on the playing video ("subtitle" look):
+          # server wall-clock, so it freezes exactly while the pod is checkpointed
+          now = time.time()
+          s = (datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
+               + ".%d  DRIFT pod" % (int(now * 10) % 10))
+          SC = 3; w = 6 * SC * len(s) + 8 * SC; h = 11 * SC
+          fg, bg = b"\xff\xeb\x78", b"\x00\x00\x00"
+          rows = []
+          for y in range(h):
+              gy = y // SC - 2
+              row = bytearray()
+              for x in range(w):
+                  gx = x // SC; ci = (gx - 4) // 6; px = (gx - 4) % 6
+                  on = False
+                  if 0 <= ci < len(s) and 0 <= gy < 7 and px < 5:
+                      g = F.get(s[ci]); on = bool(g and (g[gy] >> (4 - px)) & 1)
+                  row += fg if on else bg
+              rows.append(bytes(row))
+          return _png(w, h, rows)
+      class H(http.server.BaseHTTPRequestHandler):
+          def log_message(self, *a): pass
+          def do_GET(self):
+              if self.path.startswith("/stamp"):
+                  # single JPEG per request, polled by the viewers; a frozen pod =
+                  # no answer, so the viewer keeps the last timestamp on screen
+                  f = stamp_frame()
+                  self.send_response(200)
+                  self.send_header("Content-Type", "image/png")
+                  self.send_header("Content-Length", str(len(f)))
+                  self.send_header("Cache-Control", "no-store")
+                  self.send_header("Access-Control-Allow-Origin", "*")
+                  self.end_headers(); self.wfile.write(f); return
+              if self.path.startswith("/ue"):
+                  # phone page: the bunny playing with the server timestamp
+                  # overlaid at the top of the video, polled at 5 fps
+                  page = (b'<!doctype html><html><head><meta name="viewport" '
+                          b'content="width=device-width,initial-scale=1">'
+                          b'<title>DRIFT UE</title></head>'
+                          b'<body style="margin:0;background:#000">'
+                          b'<div style="position:relative;width:100vw;height:100vh;'
+                          b'display:flex;align-items:center;justify-content:center">'
+                          b'<video src="/loop.mp4" autoplay muted loop playsinline '
+                          b'style="width:100%;max-height:100%"></video>'
+                          b'<img id="st" style="position:absolute;top:4%;left:50%;'
+                          b'transform:translateX(-50%);width:72%;max-width:648px;'
+                          b'border-radius:6px;opacity:.92"></div>'
+                          b'<script>var i=document.getElementById("st");'
+                          b'function p(){var n=new Image();'
+                          b'n.onload=function(){i.src=n.src;setTimeout(p,200)};'
+                          b'n.onerror=function(){setTimeout(p,600)};'
+                          b'n.src="/stamp?t="+Date.now();}p();</script>'
+                          b'</body></html>')
+                  self.send_response(200)
+                  self.send_header("Content-Type", "text/html")
+                  self.send_header("Content-Length", str(len(page)))
+                  self.send_header("Cache-Control", "no-store")
+                  self.end_headers(); self.wfile.write(page); return
+              size = len(DATA); rng = self.headers.get("Range")
+              if rng:
+                  m = re.match(r"bytes=(\d+)-(\d*)", rng)
+                  s = int(m.group(1)); e = int(m.group(2)) if m and m.group(2) else size - 1
+                  e = min(e, size - 1); self.send_response(206)
+                  self.send_header("Content-Range", "bytes %d-%d/%d" % (s, e, size))
+              else:
+                  s, e = 0, size - 1; self.send_response(200)
+              self.send_header("Accept-Ranges", "bytes")
+              self.send_header("Content-Length", str(e - s + 1))
+              self.send_header("Access-Control-Allow-Origin", "*")
+              self.send_header("Content-Type", CTYPE); self.end_headers()
+              try: self.wfile.write(DATA[s:e + 1])
+              except Exception: pass
+      class Srv(socketserver.ThreadingTCPServer):
+          allow_reuse_address = True; daemon_threads = True
+      Srv(("", 9000), H).serve_forever()
+    resources:
+      requests: { cpu: "100m", memory: "256Mi" }   # ~30 MB clip in RAM + python

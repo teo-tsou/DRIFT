@@ -1,0 +1,41 @@
+#!/bin/bash
+# L2-consistent bridge setup script for node {{ inventory_hostname }}
+# Cluster: {{ cluster_name }}
+
+set -e
+echo "Setting up L2 bridges for node {{ inventory_hostname }}"
+
+# Load 8021q module
+modprobe 8021q || true
+
+{% for config in node_bridge_configs %}
+# Setup {{ config.l2_network }} bridge
+INTERFACE="{{ config.interface }}"
+VLAN_ID="{{ config.vlan_id }}"
+BRIDGE_NAME="{{ config.bridge_name }}"
+
+echo "Creating bridge ${BRIDGE_NAME} on ${INTERFACE}.${VLAN_ID}"
+
+# Create VLAN interface
+if ! ip link show ${INTERFACE}.${VLAN_ID} >/dev/null 2>&1; then
+    vconfig add ${INTERFACE} ${VLAN_ID} || true
+    ip link set ${INTERFACE}.${VLAN_ID} up || true
+fi
+
+# Create bridge
+if ! ip link show ${BRIDGE_NAME} >/dev/null 2>&1; then
+    brctl addbr ${BRIDGE_NAME} || true
+fi
+
+# Add VLAN to bridge
+if ! brctl show ${BRIDGE_NAME} 2>/dev/null | grep -q ${INTERFACE}.${VLAN_ID}; then
+    brctl addif ${BRIDGE_NAME} ${INTERFACE}.${VLAN_ID} || true
+fi
+
+# Bring up bridge
+ip link set ${BRIDGE_NAME} up || true
+
+echo "Bridge ${BRIDGE_NAME} ready for L2 network {{ config.l2_network }}"
+{% endfor %}
+
+echo "All bridges configured successfully"

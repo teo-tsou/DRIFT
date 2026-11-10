@@ -1,0 +1,338 @@
+---
+# All kubectl/install tasks run once on the first server node.
+# The install script applies manifests cluster-wide.
+
+# ── Pre-pull KubeOVN image on every node ──────────────────────────────────
+# Without pre-pull, the install script blocks on `kubectl rollout status`
+# for each component while images are being pulled (~400 MB, several minutes).
+# Pulling here in parallel on all nodes eliminates that wait entirely.
+- name: Pre-pull KubeOVN image on all nodes (into the node's active CRI)
+  # Must target whatever runtime the kubelet actually uses. On a CRI-O node
+  # (container_runtime=crio) k3s does NOT run its embedded containerd, so
+  # `k3s ctr` is a no-op there — pull into CRI-O's store with crictl instead,
+  # or the install script blocks on slow first-time pulls and hits the timeout.
+  shell: |
+    IMAGE="docker.io/kubeovn/kube-ovn:{{ kubeovn_version }}"
+    if [ -S /var/run/crio/crio.sock ]; then
+      CRICTL="crictl -r unix:///var/run/crio/crio.sock"
+      if $CRICTL images 2>/dev/null | grep -q "kubeovn/kube-ovn .*{{ kubeovn_version }}"; then
+        echo "present (crio): ${IMAGE}"; exit 0
+      fi
+      echo "pulling ${IMAGE} into CRI-O..."
+      $CRICTL pull "${IMAGE}" 2>&1 | tail -3; exit 0
+    fi
+    if ! k3s ctr version >/dev/null 2>&1; then
+      echo "no CRI accessible yet — skipping"; exit 0
+    fi
+    if k3s ctr images check "${IMAGE}" >/dev/null 2>&1; then
+      echo "image already present (containerd): ${IMAGE}"; exit 0
+    fi
+    echo "pulling ${IMAGE} into containerd..."
+    k3s ctr images pull "${IMAGE}" 2>&1 | tail -3
+  changed_when: false
+  failed_when: false
+
+# ── Disable host OVS/OVN before KubeOVN install ───────────────────────────
+# Ubuntu ships the `openvswitch-switch` + `openvswitch-common` packages
+# which install systemd units (openvswitch-switch.service, ovsdb-server.service,
+# ovs-vswitchd.service, netplan-ovs-cleanup.service, ovn-northd, ovn-central).
+# On boot these come up as root and grab /run/openvswitch — then KubeOVN's
+# ovs-ovn DaemonSet hostpath-init chowns the dir to nobody, but the host's
+# ovs-vswitchd holds locks/recreates files as root, so the in-pod
+# ovsdb-server (running as nobody) hits `Permission denied` writing
+# /var/run/openvswitch/ovsdb-server.pid.tmp and the pod CrashLoopBackOff's
+# forever. Discovered on volos-edge-edge-node-1 (June 2026) where every
+# kubectl wait for kube-ovn-cni/ovn-central timed out.
+#
+# Fix: stop + mask the host's OVS/OVN services so KubeOVN's containerized
+# OVS owns the namespace. Masking (not just disabling) so a future
+# `systemctl restart` or daemon-reload can't accidentally bring them back.
+# The package itself stays installed — removing it could affect other
+# host tooling that links against openvswitch-common.
+- name: Stop and mask host OVS/OVN systemd services (KubeOVN owns dataplane)
+  shell: |
+    for svc in openvswitch-switch ovsdb-server ovs-vswitchd netplan-ovs-cleanup ovn-northd ovn-central ovn-controller ovn-host; do
+      systemctl is-enabled "$svc" >/dev/null 2>&1 && systemctl disable "$svc" 2>/dev/null || true
+      systemctl is-active  "$svc" >/dev/null 2>&1 && systemctl stop     "$svc" 2>/dev/null || true
+      systemctl mask "$svc" 2>/dev/null || true
+    done
+    for proc in ovs-vswitchd ovsdb-server ovn-northd ovn-controller; do
+      pkill -KILL -x "$proc" 2>/dev/null || true
+    done
+    rm -rf /var/run/openvswitch/* /var/run/ovn/* 2>/dev/null || true
+    # Wipe the PERSISTENT OVS database too. KubeOVN's ovs-ovn pod
+    # bind-mounts /etc/openvswitch from the host, so any leftover
+    # bridges from a prior user of this hardware (e.g. another team's
+    # OVS course leaving r1/r2/s1/s2 topology bridges) load into the
+    # pod on first start and break pod-to-host routing on the join
+    # subnet — pods can't reach 100.64.0.1, can't reach service VIPs,
+    # kubevirt/coredns/metrics-server all CrashLoopBackOff with
+    # "no route to host" against the K8s API ClusterIP. Discovered on
+    # volos-edge-edge-node-1 (June 2026). KubeOVN re-creates conf.db
+    # cleanly on first start; nothing of ours is in there yet.
+    rm -f /etc/openvswitch/conf.db /var/lib/openvswitch/conf.db 2>/dev/null || true
+  changed_when: false
+  ignore_errors: true
+
+- name: Check if KubeOVN is already installed
+  shell: |
+    kubectl --kubeconfig {{ kubeconfig }} get deployment kube-ovn-controller \
+      -n kube-system --no-headers 2>/dev/null | awk '{print $1}'
+  register: kubeovn_check
+  changed_when: false
+  failed_when: false
+  run_once: true
+
+- name: Download KubeOVN install script
+  get_url:
+    url: "{{ kubeovn_install_script_url }}"
+    dest: /tmp/kubeovn-install.sh
+    mode: '0755'
+    force: true
+  run_once: true
+  when: kubeovn_check.stdout == ""
+
+- name: Patch KubeOVN install script to honor orchestrator-allocated CIDRs
+  # Upstream kube-ovn v1.13 install.sh hard-assigns POD_CIDR / POD_GATEWAY
+  # / SVC_CIDR / JOIN_CIDR near line 65 — they're NOT `${POD_CIDR:-...}`,
+  # so the env var the role's environment: block sets is immediately
+  # overwritten by the script itself. Result: every MC's ovn-default
+  # subnet ends up as 10.16.0.0/16 regardless of what the orchestrator
+  # allocated, breaking cross-AZ routing (peer AZs see overlapping
+  # subnet CIDRs and can't route between them).
+  #
+  # Fix: sed the variables in-place BEFORE running the script.
+  # Idempotent — sed replaces each occurrence verbatim.
+  vars:
+    _pod_cidr:   "{{ pod_cidr        | default(kubeovn_pod_cidr)  | default('10.16.0.0/16') }}"
+    _svc_cidr:   "{{ svc_cidr        | default(kubeovn_svc_cidr)  | default('10.96.0.0/12') }}"
+    _join_cidr:  "{{ kubeovn_join_cidr                            | default('100.64.0.0/16') }}"
+    # Default gateway = first usable host in the pod CIDR (e.g.
+    # 10.64.0.0/16 -> 10.64.0.1). Pure-Jinja2 string manipulation,
+    # NO ipaddr/ipaddr filter — the ipaddr filter requires the netaddr
+    # Python library which is NOT installed in the backend image (it's
+    # not in requirements.txt and adding it for one filter call is
+    # heavier than the string version). The orchestrator only allocates
+    # /16 CIDRs from MGMT_CLUSTER_CIDR_POOL (10.64.0.0/10), so the
+    # "first three octets + '.1'" pattern is always correct here.
+    _pod_gateway: "{{ _pod_cidr.split('/')[0].rsplit('.', 1)[0] ~ '.1' }}"
+  shell: |
+    # Tunnel type: kube-ovn defaults to Geneve, but the Jetson (L4T) kernels
+    # built for DRIFT ship VXLAN and no geneve module, and ovs-ovn then
+    # crash-loops. Use VXLAN when the node cannot load geneve (override with
+    # kubeovn_tunnel_type). Cross-cluster traffic uses the separate EVPN overlay.
+    if [ -n "{{ kubeovn_tunnel_type | default('') }}" ]; then tt="{{ kubeovn_tunnel_type | default('') }}"
+    elif modinfo geneve >/dev/null 2>&1; then tt=geneve; else tt=vxlan; fi
+    sed -i -e "s|^TUNNEL_TYPE=\"geneve\"|TUNNEL_TYPE=\"$tt\"|" /tmp/kubeovn-install.sh
+    # Node interface: empty = the default-route NIC; the vehicle Jetson names
+    # its 5G tunnel so cluster traffic never uses its LAN port.
+    sed -i -e 's|^IFACE=${IFACE:-}|IFACE="{{ kubeovn_iface | default('') }}"|' /tmp/kubeovn-install.sh
+    sed -i \
+      -e 's|^POD_CIDR="10\.16\.0\.0/16".*|POD_CIDR="{{ _pod_cidr }}"|' \
+      -e 's|^POD_GATEWAY="10\.16\.0\.1".*|POD_GATEWAY="{{ _pod_gateway }}"|' \
+      -e 's|^SVC_CIDR="10\.96\.0\.0/12".*|SVC_CIDR="{{ _svc_cidr }}"|' \
+      -e 's|^JOIN_CIDR="100\.64\.0\.0/16".*|JOIN_CIDR="{{ _join_cidr }}"|' \
+      /tmp/kubeovn-install.sh
+    # Echo the patched values back for the deployment log
+    grep -E '^(POD_CIDR|POD_GATEWAY|SVC_CIDR|JOIN_CIDR|TUNNEL_TYPE)=' /tmp/kubeovn-install.sh | head -5
+  run_once: true
+  when: kubeovn_check.stdout == ""
+  changed_when: true
+
+- name: Run KubeOVN installer
+  shell: bash /tmp/kubeovn-install.sh
+  args:
+    chdir: /tmp
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+    # Order matters: prefer the orchestrator-allocated per-cluster CIDR
+    # over the role default. Previously this was
+    # `{{ kubeovn_pod_cidr | default(pod_cidr) }}` — but kubeovn_pod_cidr
+    # ALWAYS resolves (it has a role default value `10.16.0.0/16`), so
+    # the orchestrator's per-cluster pod_cidr never won and every MC got
+    # the same 10.16.0.0/16. That made cross-AZ routing impossible (every
+    # pod looked like it was on the same subnet to peers). The corrected
+    # chain is pod_cidr first (orchestrator), then kubeovn_pod_cidr (role
+    # default), then a hardcoded fallback.
+    POD_CIDR: "{{ pod_cidr | default(kubeovn_pod_cidr) | default('10.16.0.0/16') }}"
+    SVC_CIDR: "{{ svc_cidr | default(kubeovn_svc_cidr) | default('10.96.0.0/12') }}"
+    JOIN_CIDR: "{{ kubeovn_join_cidr | default('100.64.0.0/16') }}"
+    ENABLE_SSL: "false"
+    ENABLE_IC: "false"
+    # Disable per-pod gateway connectivity check on the default subnet.
+    # With the check ON (default), kube-ovn-cni pings the subnet gateway from
+    # each new pod's netns before completing sandbox setup. Until ovn-controller
+    # has programmed the gateway flows AND ovn0's MAC matches OVN NB (fixed by
+    # our MAC-sync task further below), every ping fails — so EVERY pod scheduled
+    # at install time (coredns/traefik/metrics-server/etc.) blocks ~150s in
+    # ContainerCreating, all unblocking simultaneously the instant MAC-sync runs.
+    # Turning the check off lets pods start immediately; the MAC-sync task still
+    # guarantees real gateway connectivity for actual traffic. Sets the
+    # ovn-default subnet's disableGatewayCheck=true via --default-gateway-check.
+    CHECK_GATEWAY: "false"
+    # K3s uses a different CNI bin dir than kubeadm
+    CNI_CONF_DIR: "/var/lib/rancher/k3s/agent/etc/cni/net.d"
+    CNI_BIN_DIR: "/var/lib/rancher/k3s/data/current/bin"
+  register: kubeovn_install_result
+  run_once: true
+  when: kubeovn_check.stdout == ""
+  # Script applies resources in two batches separated by an internal rollout wait.
+  # timeout lets both batches be applied (~10s each, ~120s between them) then kills
+  # the script before its slow internal waits complete. Our ansible tasks below
+  # handle all readiness checking. ignore_errors (not just failed_when) is REQUIRED:
+  # the `timeout:` keyword raises an action-timeout that failed_when does NOT
+  # suppress, so without ignore_errors the intentional kill fails the whole play.
+  # Bumped to 420s to give a CRI-O node (first-time image pulls) room to apply.
+  failed_when: false
+  ignore_errors: true
+  timeout: 420
+
+- name: Show install output
+  debug:
+    msg: "{{ (kubeovn_install_result.stdout_lines | default([]))[-30:] }}"
+  run_once: true
+  when:
+    - kubeovn_check.stdout == ""
+    - kubeovn_install_result is defined
+
+- name: Remove install script
+  file:
+    path: /tmp/kubeovn-install.sh
+    state: absent
+  run_once: true
+
+- name: Wait for ovn-central to be ready
+  shell: |
+    kubectl --kubeconfig {{ kubeconfig }} wait pod \
+      -n kube-system \
+      -l app=ovn-central \
+      --for=condition=Ready --timeout=600s
+  changed_when: false
+  run_once: true
+  register: _retxt_waitovncentral
+  retries: 5
+  delay: 4
+  until: _retxt_waitovncentral.rc == 0 or 'Text file busy' not in _retxt_waitovncentral.stderr
+
+- name: Wait for ovs-ovn daemonset to be ready
+  shell: |
+    kubectl --kubeconfig {{ kubeconfig }} rollout status daemonset/ovs-ovn \
+      -n kube-system --timeout=300s
+  changed_when: false
+  run_once: true
+  register: _retxt_waitovsovn
+  retries: 5
+  delay: 4
+  until: _retxt_waitovsovn.rc == 0 or 'Text file busy' not in _retxt_waitovsovn.stderr
+
+- name: Wait for kube-ovn-controller to be ready
+  shell: |
+    kubectl --kubeconfig {{ kubeconfig }} wait pod \
+      -n kube-system \
+      -l app=kube-ovn-controller \
+      --for=condition=Ready --timeout=600s
+  changed_when: false
+  run_once: true
+  register: _retxt_waitkoctl
+  retries: 5
+  delay: 4
+  until: _retxt_waitkoctl.rc == 0 or 'Text file busy' not in _retxt_waitkoctl.stderr
+
+- name: Sync ovn0 MAC with OVN NB LSP + restart cni (prevent kube-ovn-cni CrashLoopBackOff)
+  # kube-ovn-cni creates the ovn0 OVS internal port then pings the join gateway
+  # (100.64.0.1) to verify connectivity. If OVN NB's node LSP MAC != ovn0's real
+  # MAC, OVN sends the ICMP reply to the wrong dl_dst, the kernel drops it, and the
+  # cni CrashLoopBackOff's forever ("100.64.0.2 network not ready after N ping").
+  #
+  # ovn0 lives INSIDE the ovs-ovn pod's OVS (not on the host) — so ovs-vsctl MUST
+  # run in that pod (running it on the host silently finds nothing and skips). Read
+  # ovn0's real MAC there, pin the OVN NB LSP to it (keeping the join IP), then
+  # restart the crashing cni + pinger so they re-init against the corrected LSP.
+  shell: |
+    set -e
+    NODE="{{ inventory_hostname }}"
+    LSP="node-${NODE}"
+    KC="--kubeconfig {{ kubeconfig }}"
+    OVNC=$(kubectl $KC -n kube-system get pod -l app=ovn-central -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    OVS=$(kubectl $KC -n kube-system get pod -l app=ovs --field-selector spec.nodeName=${NODE} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    [ -n "$OVNC" ] && [ -n "$OVS" ] || { echo "ovn-central/ovs pod not found — skipping"; exit 0; }
+    nb()  { kubectl $KC -n kube-system exec "$OVNC" -c ovn-central -- ovn-nbctl "$@"; }
+    ovs() { kubectl $KC -n kube-system exec "$OVS" -c openvswitch -- ovs-vsctl "$@"; }
+
+    # ovn0 is created by the (crashing) cni but persists in OVS across its restarts
+    OVS_MAC=""
+    for i in $(seq 1 45); do
+      OVS_MAC=$(ovs get interface ovn0 mac_in_use 2>/dev/null | tr -d '"')
+      echo "$OVS_MAC" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' && break
+      sleep 2
+    done
+    echo "$OVS_MAC" | grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "ovn0 MAC not ready — skipping"; exit 0; }
+
+    NB_ADDR=$(nb lsp-get-addresses "$LSP" 2>/dev/null)
+    NB_MAC=$(echo "$NB_ADDR" | awk '{print $1}')
+    NB_IP=$(echo "$NB_ADDR" | awk '{print $2}')
+
+    if [ "$NB_MAC" != "$OVS_MAC" ]; then
+      echo "MAC desync: LSP($LSP)=$NB_MAC  ovn0=$OVS_MAC — pinning LSP to ovn0 (ip=${NB_IP:-100.64.0.2}) + restarting cni"
+      nb lsp-set-addresses "$LSP" "${OVS_MAC} ${NB_IP:-100.64.0.2}"
+      kubectl $KC -n kube-system delete pod -l app=kube-ovn-cni --field-selector spec.nodeName=${NODE} --wait=false >/dev/null 2>&1 || true
+      kubectl $KC -n kube-system delete pod -l app=kube-ovn-pinger --field-selector spec.nodeName=${NODE} --wait=false >/dev/null 2>&1 || true
+    else
+      echo "MAC in sync: $OVS_MAC"
+    fi
+  changed_when: false
+  failed_when: false
+  run_once: true
+
+- name: Wait for kube-ovn-cni daemonset pods to be ready
+  shell: |
+    kubectl --kubeconfig {{ kubeconfig }} rollout status daemonset/kube-ovn-cni \
+      -n kube-system --timeout=600s
+  changed_when: false
+  run_once: true
+  register: _retxt_waitcni
+  retries: 5
+  delay: 4
+  until: _retxt_waitcni.rc == 0 or 'Text file busy' not in _retxt_waitcni.stderr
+
+- name: Kick kube-system pods that crashed before the overlay was ready
+  # With CHECK_GATEWAY=false pods start immediately instead of blocking ~150s on
+  # the gateway check — but pods K3s scheduled at install time (coredns, traefik,
+  # metrics-server, pinger, local-path) come up BEFORE ovn-controller has
+  # programmed flows + the MAC sync above has run, so their first connection to
+  # the apiserver ClusterIP (10.43.0.1) times out and they enter CrashLoopBackOff.
+  # By now the overlay is fully working (CNI ready + MAC synced), but those pods
+  # are stuck in exponential backoff (up to 5 min each). Deleting the not-ready
+  # ones forces an immediate clean recreate on the now-working network.
+  # Verified: deleting them brings every pod to 1/1 Running, 0 restarts in ~45s.
+  shell: |
+    STUCK=$(kubectl --kubeconfig {{ kubeconfig }} get pods -n kube-system \
+      --no-headers 2>/dev/null | awk '
+        { split($2, r, "/") }
+        $3 == "Completed" { next }
+        $3 != "Running" || r[1] != r[2] { print $1 }')
+    if [ -z "${STUCK}" ]; then
+      echo "no stuck pods — overlay was ready before workloads started"
+      exit 0
+    fi
+    echo "kicking stuck pods: ${STUCK}"
+    kubectl --kubeconfig {{ kubeconfig }} delete pod -n kube-system ${STUCK} \
+      --ignore-not-found=true 2>/dev/null || true
+  changed_when: false
+  failed_when: false
+  run_once: true
+
+- name: Verify KubeOVN pods
+  shell: |
+    kubectl --kubeconfig {{ kubeconfig }} get pods -n kube-system \
+      -l app.kubernetes.io/name=kube-ovn --no-headers 2>/dev/null || \
+    kubectl --kubeconfig {{ kubeconfig }} get pods -n kube-system \
+      -l app=kube-ovn-controller --no-headers
+  register: ovn_pods
+  changed_when: false
+  run_once: true
+
+- name: Show KubeOVN pod status
+  debug:
+    msg: "{{ ovn_pods.stdout_lines }}"
+  run_once: true

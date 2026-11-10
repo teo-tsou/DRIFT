@@ -1,0 +1,85 @@
+---
+# Skip the entire role if this node was already prepared.
+# prepare_all_nodes.yml runs this role first; create_management_cluster.yml
+# then calls it again — the marker prevents the second run from repeating
+# apt operations that already completed.
+- name: Check if node is already prepared
+  stat:
+    path: /etc/drift-node-prepared
+  register: _prepared_marker
+
+- name: Refresh apt cache (no upgrade — required packages installed below)
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: not _prepared_marker.stat.exists
+
+- name: Install required packages
+  apt:
+    name:
+      - curl
+      - wget
+      - apt-transport-https
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - bridge-utils
+      - vlan
+      - open-iscsi
+      - nfs-common
+    state: present
+  when: not _prepared_marker.stat.exists
+
+- name: Enable and start iscsid service
+  systemd:
+    name: iscsid
+    enabled: yes
+    state: started
+  when: not _prepared_marker.stat.exists
+
+- name: Load kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - br_netfilter
+    - 8021q
+  when: not _prepared_marker.stat.exists
+
+- name: Make kernel modules persistent
+  lineinfile:
+    path: /etc/modules-load.d/k8s.conf
+    line: "{{ item }}"
+    create: yes
+  loop:
+    - br_netfilter
+    - 8021q
+  when: not _prepared_marker.stat.exists
+
+- name: Configure sysctl settings
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+  loop:
+    - { key: "net.ipv4.ip_forward", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+  when: not _prepared_marker.stat.exists
+
+- name: Disable swap
+  shell: |
+    swapoff -a
+    sed -i '/ swap / s/^/#/' /etc/fstab
+  when:
+    - not _prepared_marker.stat.exists
+    - ansible_swaptotal_mb | default(0) | int > 0
+
+# Touch marker so subsequent plays (create_management_cluster.yml) skip this role.
+- name: Mark node as prepared
+  file:
+    path: /etc/drift-node-prepared
+    state: touch
+    mode: '0444'
+  when: not _prepared_marker.stat.exists

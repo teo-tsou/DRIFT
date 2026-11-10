@@ -1,0 +1,7 @@
+---
+- name: Deploy KubeVirt
+  hosts: management_nodes
+  become: true
+  gather_facts: false
+  roles:
+    - role: kubevirt

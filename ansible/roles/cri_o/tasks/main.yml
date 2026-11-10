@@ -1,0 +1,181 @@
+---
+# Install CRI-O + enable its CRIU checkpoint/restore support. Installed
+# alongside the existing runtime; wiring K3s's kubelet to CRI-O
+# (--container-runtime-endpoint) is a separate, disruptive step done only once
+# checkpoint/restore is proven.
+
+- name: Ensure apt keyrings dir
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+# pkgs.k8s.io often has no repo yet for the newest k8s minor (v1.34 -> 403).
+# Probe candidates (requested first, then older minors) and use the first that
+# actually exists, so provisioning does not hard-fail on a missing CRI-O repo.
+- name: Probe pkgs.k8s.io for an available CRI-O version
+  # pkgs.k8s.io 302-redirects to a CDN; a missing minor resolves to 403 after the
+  # redirect (v1.34/v1.33 today), an existing one to 200 — so follow redirects and
+  # read the FINAL status. (Verified 2026: newest stable is v1.32.)
+  uri:
+    url: "https://pkgs.k8s.io/addons:/cri-o:/{{ crio_channel }}:/{{ item }}/deb/Release.key"
+    method: GET
+    follow_redirects: all
+    return_content: false
+    status_code: [200, 403, 404]
+  loop: "{{ ([crio_version] + crio_fallback_versions) | unique }}"
+  register: crio_probe
+  changed_when: false
+
+- name: Select the first reachable CRI-O version
+  set_fact:
+    crio_version_eff: "{{ (crio_probe.results | selectattr('status', 'equalto', 200)
+                          | map(attribute='item') | list | first) | default('') }}"
+
+- name: Fail clearly if no CRI-O repo is reachable
+  assert:
+    that: crio_version_eff | length > 0
+    fail_msg: >-
+      No CRI-O apt repo found on pkgs.k8s.io for any of
+      {{ ([crio_version] + crio_fallback_versions) | unique | join(', ') }}.
+    success_msg: "Using CRI-O {{ crio_version_eff }} (requested {{ crio_version }})"
+
+- name: Add the CRI-O apt signing key
+  get_url:
+    url: "https://pkgs.k8s.io/addons:/cri-o:/{{ crio_channel }}:/{{ crio_version_eff }}/deb/Release.key"
+    dest: /etc/apt/keyrings/cri-o-apt-keyring.asc
+    mode: "0644"
+
+- name: Add the CRI-O apt repository
+  apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.asc] https://pkgs.k8s.io/addons:/cri-o:/{{ crio_channel }}:/{{ crio_version_eff }}/deb/ /"
+    filename: cri-o
+    state: present
+    update_cache: true
+
+- name: Install CRI-O
+  apt:
+    name: cri-o
+    state: present
+
+- name: Enable CRIU checkpoint/restore support in CRI-O
+  copy:
+    dest: /etc/crio/crio.conf.d/10-drift-criu.conf
+    content: |
+      # DRIFT: enable container checkpoint/restore (CRIU) for pod live-migration
+      [crio.runtime]
+      enable_criu_support = true
+    mode: "0644"
+  notify: restart crio
+
+- name: Use runc instead of the bundled static crun for checkpoint/restore
+  # CRI-O's bundled crun is statically linked; its dlopen("libcriu.so.2") fails
+  # from a static binary, so checkpoint dies with "could not load libcriu.so.2".
+  # runc (dynamically linked) execs the criu BINARY instead — no dlopen — and
+  # under CRI-O uses the host's GNU tar (K3s's busybox tar is not in PATH here).
+  copy:
+    dest: /etc/crio/crio.conf.d/11-drift-runc.conf
+    content: |
+      [crio.runtime]
+      default_runtime = "runc"
+      [crio.runtime.runtimes.runc]
+      runtime_path = "/usr/libexec/crio/runc"
+      runtime_type = "oci"
+      runtime_root = "/run/runc"
+      monitor_path = "/usr/libexec/crio/conmon"
+    mode: "0644"
+  notify: restart crio
+
+- name: Allow container restore (unset the namespaced signature policy)
+  # CRI-O blocks restore when a namespaced signature policy is set ("signature
+  # validation is not supported for container restore"), even a permissive one.
+  copy:
+    dest: /etc/crio/crio.conf.d/12-drift-nosigpolicy.conf
+    content: |
+      [crio.image]
+      signature_policy = ""
+    mode: "0644"
+  notify: restart crio
+
+- name: Detect cgroup version (v2 has cgroup.controllers at the root)
+  stat:
+    path: /sys/fs/cgroup/cgroup.controllers
+  register: cgroup_v2
+
+- name: Align CRI-O with the kubelet cgroup driver + use the host CNI
+  # The kubelet and runtime MUST agree on the cgroup driver: K3s uses systemd on
+  # cgroup v2, cgroupfs on v1. Point CRI-O at the node's CNI (multus -> kube-ovn).
+  copy:
+    dest: /etc/crio/crio.conf.d/13-drift-k3s.conf
+    content: |
+      [crio.runtime]
+      cgroup_manager = "{{ 'systemd' if cgroup_v2.stat.exists else 'cgroupfs' }}"
+      conmon_cgroup = "{{ 'system.slice' if cgroup_v2.stat.exists else 'pod' }}"
+      [crio.network]
+      # The conflists land in /etc/cni/net.d (multus/kube-ovn), but their PLUGIN
+      # BINARIES (multus, kube-ovn) go to the K3s CNI bin dir, not /opt/cni/bin.
+      # CRI-O reports "no CNI configuration file in /etc/cni/net.d" when a conf
+      # references a plugin it can't find in plugin_dirs — so it must search the
+      # K3s bin dir too. (/opt/cni/bin keeps the macvlan/static plugins the
+      # pod_migration role drops there for the cross-cluster floating IP.)
+      network_dir = "/etc/cni/net.d"
+      plugin_dirs = ["/opt/cni/bin", "/var/lib/rancher/k3s/data/current/bin"]
+    mode: "0644"
+  notify: restart crio
+
+- name: Match containerd's defaults so kube-ovn (and similar) pods work on CRI-O
+  # Two CRI-O-vs-containerd differences break kube-ovn's ovs-ovn/cni pods:
+  #  * CRI-O's default_capabilities omit NET_RAW (and others). The iptables
+  #    binary carries file-caps (cap_net_raw+ep); if NET_RAW is not in the
+  #    process bounding set, execve of iptables fails with EPERM — even as root.
+  #  * CRI-O applies a default AppArmor profile; containerd/K3s does not.
+  copy:
+    dest: /etc/crio/crio.conf.d/14-drift-compat.conf
+    content: |
+      [crio.runtime]
+      apparmor_profile = "unconfined"
+      default_capabilities = [
+        "CHOWN", "DAC_OVERRIDE", "FSETID", "FOWNER", "SETGID", "SETUID",
+        "SETPCAP", "NET_BIND_SERVICE", "KILL", "NET_RAW", "MKNOD",
+        "SETFCAP", "SYS_CHROOT", "AUDIT_WRITE",
+      ]
+    mode: "0644"
+  notify: restart crio
+
+- name: Ensure /etc/containers exists
+  file:
+    path: /etc/containers
+    state: directory
+    mode: "0755"
+
+- name: Ensure a permissive containers signature policy exists
+  # With crio signature_policy unset, image pulls fall back to this system file;
+  # if it is missing, every pull fails with "open /etc/containers/policy.json".
+  copy:
+    dest: /etc/containers/policy.json
+    content: |
+      { "default": [ { "type": "insecureAcceptAnything" } ] }
+    mode: "0644"
+  notify: restart crio
+
+- name: Enable + start CRI-O
+  systemd:
+    name: crio
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply any pending CRI-O restart
+  meta: flush_handlers
+
+- name: Verify CRI-O is up (crictl may not exist yet pre-K3s, so use crio)
+  command: crio version
+  register: crio_ver
+  changed_when: false
+
+- name: Report CRI-O + checkpoint capability
+  debug:
+    msg: >-
+      {{ inventory_hostname }}:
+      {{ crio_ver.stdout_lines | select('search', 'Version|GitCommit') | first | default('CRI-O installed') }}
+      | criu support + runc runtime + checkpoint/restore config applied

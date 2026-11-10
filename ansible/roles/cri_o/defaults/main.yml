@@ -1,0 +1,25 @@
+---
+# CRI-O — a container runtime that implements the CRI checkpoint AND restore
+# path (unlike K3s's embedded containerd, which can checkpoint but not restore).
+# This is the basis for same-architecture pod live-migration on the edge.
+#
+# Installed from the upstream pkgs.k8s.io CRI-O repo, version-matched to the
+# Kubernetes version. Requires CRIU on the node (see the `criu` role).
+#
+# NOBLE NOTE: the pkgs.k8s.io repo is a DISTRO-AGNOSTIC flat repo ("deb/ /", no
+# Ubuntu codename), so this role installs unchanged on 24.04/noble. The cgroup
+# driver is auto-selected below (cgroupfs on v1 — the DRIFT edge default — or
+# systemd on v2), so it also adapts to whichever cgroup mode the node booted.
+crio_channel: "stable"
+crio_version: "v1.31"     # match the K3s Kubernetes minor (requested; see fallback)
+# pkgs.k8s.io publishes CRI-O stable a minor or two BEHIND the newest k8s (e.g.
+# no v1.34 repo yet for k3s v1.34.x — it 403s). The role probes these in order,
+# starting from crio_version, and uses the first repo that actually exists. CRI-O
+# tolerates a small version skew from the kubelet, so an older minor is fine.
+crio_fallback_versions:
+  - "v1.34"
+  - "v1.33"
+  - "v1.32"
+  - "v1.31"
+  - "v1.30"
+crio_socket: "unix:///var/run/crio/crio.sock"

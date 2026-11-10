@@ -1,0 +1,104 @@
+
+---
+- name: Prepare nodes for Longhorn
+  hosts: management_nodes
+  gather_facts: true
+  become: true
+  roles:
+    - longhorn
+
+- name: Deploy Longhorn (cluster-scoped actions)
+  hosts: management_nodes
+  gather_facts: false
+  run_once: true
+  become: true
+  vars:
+    kubeconfig_path: "/etc/rancher/k3s/k3s.yaml"
+    longhorn_version: "v1.5.3"
+    longhorn_manifest: "/tmp/longhorn-{{ longhorn_version }}.yaml"
+
+  tasks:
+    - name: Wait for kubeconfig to exist
+      wait_for:
+        path: "{{ kubeconfig_path }}"
+        timeout: 300
+
+    - name: Verify cluster is reachable
+      command: "kubectl --kubeconfig {{ kubeconfig_path }} get nodes"
+      become: true
+      register: kubectl_test
+      retries: 5
+      delay: 10
+      until: kubectl_test.rc == 0
+
+    - name: Download Longhorn manifest {{ longhorn_version }}
+      get_url:
+        url: "https://raw.githubusercontent.com/longhorn/longhorn/{{ longhorn_version }}/deploy/longhorn.yaml"
+        dest: "{{ longhorn_manifest }}"
+        mode: '0644'
+
+    - name: Apply Longhorn manifest
+      shell: kubectl --kubeconfig {{ kubeconfig_path }} apply -f {{ longhorn_manifest }}
+      changed_when: true
+
+    # Longhorn's manager DaemonSet is created by its deploying controller a moment
+    # AFTER apply — `rollout status` fired too early errors "not found" and (with a
+    # slow first-time CRI-O image pull underneath) can burn the retry budget. Wait
+    # for the DS object to EXIST first, then for it to roll out.
+    - name: Wait for the longhorn-manager DaemonSet object to appear
+      shell: |
+        kubectl --kubeconfig {{ kubeconfig_path }} get daemonset/longhorn-manager -n longhorn-system
+      register: lh_ds
+      retries: 30
+      delay: 10
+      until: lh_ds.rc == 0
+      changed_when: false
+
+    - name: Wait for longhorn-manager DaemonSet to be fully available
+      shell: |
+        kubectl --kubeconfig {{ kubeconfig_path }} rollout status daemonset/longhorn-manager -n longhorn-system --timeout=300s
+      register: lh_wait
+      retries: 8
+      delay: 15
+      until: lh_wait.rc == 0
+      changed_when: false
+
+    - name: Create Longhorn RWX StorageClass (idempotent)
+      shell: |
+        kubectl --kubeconfig {{ kubeconfig_path }} apply -f - <<'EOF'
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: longhorn-rwx
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "true"
+        provisioner: driver.longhorn.io
+        allowVolumeExpansion: true
+        reclaimPolicy: Delete
+        volumeBindingMode: Immediate
+        parameters:
+          numberOfReplicas: "1"
+          staleReplicaTimeout: "2880"
+          fromBackup: ""
+          accessMode: "ReadWriteMany"
+        EOF
+      changed_when: false
+
+    - name: Set Longhorn global default replica count to 1
+      shell: |
+        kubectl --kubeconfig {{ kubeconfig_path }} patch settings.longhorn.io default-replica-count \
+          -n longhorn-system --type=merge -p '{"value":"1"}'
+        kubectl --kubeconfig {{ kubeconfig_path }} patch settings.longhorn.io storage-minimal-available-percentage \
+          -n longhorn-system --type=merge -p '{"value":"5"}'
+      changed_when: false
+
+    - name: Remove default annotation from other StorageClasses (idempotent)
+      become: true
+      shell: |
+        set -e
+        for sc in $(kubectl --kubeconfig {{ kubeconfig_path }} get sc -o jsonpath='{.items[*].metadata.name}'); do
+          if [ "$sc" != "longhorn-rwx" ]; then
+            kubectl --kubeconfig {{ kubeconfig_path }} annotate sc "$sc" storageclass.kubernetes.io/is-default-class- >/dev/null 2>&1 || true
+          fi
+        done
+      changed_when: false

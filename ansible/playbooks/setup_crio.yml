@@ -1,0 +1,14 @@
+---
+# Install CRI-O + CRIU checkpoint/restore support on edge nodes. Installed
+# alongside the existing runtime for a checkpoint/restore proof; wiring K3s to
+# CRI-O is a separate step. Run against one node first with --limit.
+#
+#   ansible-playbook -i inventories/xcluster/hosts.yml playbooks/setup_crio.yml --limit edge-a-084
+- name: CRI-O checkpoint/restore runtime on the edge
+  hosts: xcluster_pair
+  become: true
+  gather_facts: false
+  vars:
+    ansible_ssh_pipelining: true
+  roles:
+    - cri_o

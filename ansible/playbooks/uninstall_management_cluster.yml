@@ -1,0 +1,233 @@
+---
+- name: Uninstall Management Cluster (No Hang, No Reboot)
+  hosts: management_nodes
+  become: true
+  gather_facts: false
+  # No serial — all nodes cleaned in parallel
+  vars:
+    ansible_ssh_pipelining: true
+    ansible_command_timeout: 60
+    ansible_become_timeout: 30
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3'
+  tasks:
+    # Check both server and agent uninstall scripts — agent nodes only have k3s-agent-uninstall.sh
+    - name: Check if K3s server uninstall script exists
+      stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: k3s_server_script
+
+    - name: Check if K3s agent uninstall script exists
+      stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: k3s_agent_script
+
+    - name: Stop K3s server service
+      systemd:
+        name: k3s
+        state: stopped
+      ignore_errors: true
+      when: k3s_server_script.stat.exists
+      timeout: 30
+
+    - name: Stop K3s agent service
+      systemd:
+        name: k3s-agent
+        state: stopped
+      ignore_errors: true
+      when: k3s_agent_script.stat.exists
+      timeout: 30
+
+    - name: Kill K3s processes forcefully first
+      shell: |
+        timeout 10 killall -9 k3s || true
+        timeout 10 killall -9 containerd || true
+        timeout 10 killall -9 kubelet || true
+      ignore_errors: true
+      timeout: 30
+
+    - name: Run K3s server uninstall script
+      shell: |
+        timeout 60 /usr/local/bin/k3s-uninstall.sh || echo "K3s server uninstall completed or timed out"
+      ignore_errors: true
+      when: k3s_server_script.stat.exists
+      async: 90
+      poll: 5
+      timeout: 90
+
+    - name: Run K3s agent uninstall script
+      shell: |
+        timeout 60 /usr/local/bin/k3s-agent-uninstall.sh || echo "K3s agent uninstall completed or timed out"
+      ignore_errors: true
+      when: k3s_agent_script.stat.exists and not k3s_server_script.stat.exists
+      async: 90
+      poll: 5
+      timeout: 90
+
+    - name: Kill any remaining K3s processes again
+      shell: |
+        timeout 10 killall -TERM k3s || true
+        timeout 10 killall -KILL k3s || true
+        timeout 10 killall -KILL containerd || true
+        timeout 10 killall -KILL kubelet || true
+      ignore_errors: true
+      timeout: 30
+
+    - name: Remove k3s binary if still present (fallback for incomplete uninstall)
+      shell: |
+        rm -f /usr/local/bin/k3s || true
+        rm -f /usr/local/bin/k3s-uninstall.sh || true
+        rm -f /usr/local/bin/k3s-agent-uninstall.sh || true
+      ignore_errors: true
+      timeout: 10
+
+    - name: Check which directories actually exist before removal
+      stat:
+        path: "{{ item }}"
+      register: dir_check
+      loop:
+        - /etc/rancher
+        - /var/lib/rancher
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/longhorn
+        - /etc/cni/net.d
+        - /var/lib/cni
+      ignore_errors: true
+      timeout: 10
+
+    - name: Remove directories
+      shell: |
+        timeout 30 rm -rf "{{ item.item }}" || echo "Partial removal of {{ item.item }}"
+      loop: "{{ dir_check.results }}"
+      when: item.stat.exists | default(false)
+      ignore_errors: true
+      async: 40
+      poll: 5
+      timeout: 40
+
+    - name: Remove systemd services with timeout
+      shell: |
+        timeout 10 systemctl stop bridge-setup.service || true
+        timeout 10 systemctl disable bridge-setup.service || true
+        rm -f /etc/systemd/system/bridge-setup.service || true
+        rm -f /usr/local/bin/setup-multi-bridges.sh || true
+        timeout 10 systemctl daemon-reload || true
+      ignore_errors: true
+      timeout: 30
+
+    - name: Clean up L2 network bridges with timeout
+      shell: |
+        # Remove bridges created by our framework
+        for bridge in $(ip link show type bridge 2>/dev/null | grep -oE 'drift-br[0-9]+' || true); do
+          if [ -n "$bridge" ]; then
+            echo "Removing bridge: $bridge"
+            timeout 5 ip link set $bridge down 2>/dev/null || true
+            timeout 5 ip link delete $bridge type bridge 2>/dev/null || true
+          fi
+        done
+        
+        # Remove VLAN interfaces
+        for vlan_if in $(ip link show 2>/dev/null | grep -E "\.200@|\.300@|\.400@" | awk -F: '{print $2}' | sed 's/ //g' || true); do
+          if [ -n "$vlan_if" ]; then
+            echo "Removing VLAN interface: $vlan_if"
+            timeout 5 ip link delete $vlan_if 2>/dev/null || true
+          fi
+        done
+      ignore_errors: true
+      timeout: 30
+
+    - name: Reset networking (non-destructive) with timeout
+      shell: |
+        # Only remove bridge if it exists
+        if ip link show br0 2>/dev/null; then
+          timeout 10 ip link delete br0 2>/dev/null || true
+        fi
+        # Apply netplan without removing existing configs
+        timeout 20 netplan apply || true
+      ignore_errors: true
+      timeout: 30
+
+    - name: Stop container runtimes + clean CRI-O containers/pods (DRIFT edge)
+      # A pod-migration edge runs the kubelet on CRI-O, so its containers/pods
+      # SURVIVE k3s-uninstall.sh (which only knows k3s' containerd). Remove them
+      # and stop CRI-O, and unmount the shared checkpoint store, or the node keeps
+      # running stale pods and a re-provision inherits orphaned sandboxes.
+      shell: |
+        # A shared node (e.g. a Jetson that also runs the ECB energy/inference
+        # containers) keeps Docker: its containerd.service belongs to Docker, not
+        # k3s, so stop both only when Docker has no running containers.
+        # (No apostrophes in this block: Ansible splits the free-form shell
+        # argument and an odd quote count fails the whole playbook to parse.)
+        if ! command -v docker >/dev/null 2>&1 || [ -z "$(docker ps -q 2>/dev/null)" ]; then
+          timeout 10 systemctl stop docker 2>/dev/null || true
+          timeout 10 systemctl stop containerd 2>/dev/null || true
+        fi
+        if [ -S /var/run/crio/crio.sock ]; then
+          CRICTL="crictl -r unix:///var/run/crio/crio.sock"
+          timeout 40 $CRICTL rm -af  2>/dev/null || true
+          timeout 40 $CRICTL rmp -af 2>/dev/null || true
+        fi
+        timeout 10 systemctl stop crio 2>/dev/null || true
+        timeout 10 umount -f /srv/drift-ckpt 2>/dev/null || true
+      ignore_errors: true
+      timeout: 120
+
+    - name: Clean up bridge metadata files
+      shell: |
+        rm -rf /etc/kubernetes/bridges/ || true
+        rm -f /etc/kubernetes/{{ inventory_hostname }}-*.conf || true
+        rm -f /etc/kubernetes/{{ cluster_name }}-*.conf || true
+      ignore_errors: true
+      timeout: 15
+
+    - name: Fully reset the kube-ovn/OVS dataplane (interfaces + datapath + db)
+      # Removing conf.db alone leaves the LIVE dataplane behind: the ovn0 internal
+      # port, geneve tunnels, OVS bridges, and the kernel datapath all persist in
+      # the host netns. A re-provision then inherits a polluted OVS state and
+      # kube-ovn-cni can't reach the join gateway (100.64.0.1) — which previously
+      # required a manual reboot. Delete those interfaces, drop the datapath, and
+      # reload the module so the node is as clean as a reboot, no reboot needed.
+      shell: |
+        # kill any host-side OVS/OVN daemons (normally in-pod, but be safe)
+        killall -9 ovs-vswitchd ovsdb-server ovn-controller ovn-northd 2>/dev/null || true
+        # OVS internal + kube-ovn + EVPN interfaces live in the host netns
+        for i in ovn0 mirror0 br-int br-phy br-drift vx-drift genev_sys_6081; do
+          ip link del "$i" 2>/dev/null || true
+        done
+        # any remaining geneve tunnel devices (port can vary)
+        for i in $(ip -o link show 2>/dev/null | grep -oE 'genev_sys_[0-9]+' | sort -u); do
+          ip link del "$i" 2>/dev/null || true
+        done
+        # drop OVS datapaths, then the kernel module (clears the datapath entirely)
+        for dp in $(ovs-dpctl dump-dps 2>/dev/null); do ovs-dpctl del-dp "$dp" 2>/dev/null || true; done
+        modprobe -r openvswitch 2>/dev/null || true
+        # remove OVS/OVN db + runtime state
+        rm -f  /etc/openvswitch/conf.db /var/lib/openvswitch/conf.db 2>/dev/null || true
+        rm -rf /var/run/openvswitch/* /var/run/ovn/* /etc/openvswitch/system-id.conf 2>/dev/null || true
+        # unmask host OVS/OVN services masked at install
+        for svc in openvswitch-switch ovsdb-server ovs-vswitchd ovn-northd ovn-central ovn-controller; do
+          systemctl unmask "$svc" 2>/dev/null || true
+        done
+      ignore_errors: true
+      timeout: 45
+
+    - name: Final status check with timeout
+      shell: |
+        echo "=== Uninstall Status for {{ inventory_hostname }} ==="
+        echo "K3s binary:"
+        ls /usr/local/bin/k3s 2>/dev/null && echo "WARNING: k3s binary still present" || echo "k3s binary removed"
+        echo "K3s processes:"
+        timeout 5 pgrep -a -f "k3s (server|agent|worker)" 2>/dev/null || echo "No K3s processes running"
+        echo "Remaining directories:"
+        timeout 5 ls -la /etc/rancher /var/lib/rancher /var/lib/longhorn 2>/dev/null || echo "Directories cleaned up"
+        echo "Bridges:"
+        timeout 5 ip link show type bridge | grep drift-br || echo "No drift bridges remaining"
+        echo "Services:"
+        timeout 5 systemctl is-active k3s 2>/dev/null && echo "WARNING: k3s server still active" || true
+        timeout 5 systemctl is-active k3s-agent 2>/dev/null && echo "WARNING: k3s-agent still active" || echo "K3s services not active"
+        echo "=== Uninstall Complete ==="
+      ignore_errors: true
+      timeout: 30
+
+# Note: No reboot task - manual reboot recommended if reinstalling
+...

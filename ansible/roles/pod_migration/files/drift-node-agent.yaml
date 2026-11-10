@@ -1,0 +1,49 @@
+# drift-node-agent — privileged per-node executor for pod live-migration.
+# The Secret (token) and the ConfigMap (the agent script) are created at deploy
+# time; see the pod_migration role / README. Deploy:
+#   kubectl -n kube-system create secret generic drift-node-agent \
+#       --from-literal=token=$(openssl rand -hex 24)
+#   kubectl -n kube-system create configmap drift-node-agent-script \
+#       --from-file=drift-node-agent.py
+#   kubectl apply -f drift-node-agent.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: drift-node-agent
+  namespace: kube-system
+  labels: {app: drift-node-agent}
+spec:
+  selector:
+    matchLabels: {app: drift-node-agent}
+  template:
+    metadata:
+      labels: {app: drift-node-agent}
+    spec:
+      hostPID: true                       # see host PID 1 for `nsenter -t 1`
+      hostNetwork: true                   # reachable at <nodeIP>:8099
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists                # every node, incl. control-plane
+      containers:
+        - name: agent
+          image: docker.io/library/python:3-slim
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/opt/agent/drift-node-agent.py"]
+          env:
+            - name: DRIFT_AGENT_PORT
+              value: "8099"
+            - name: DRIFT_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef: {name: drift-node-agent, key: token}
+          securityContext:
+            privileged: true              # host-root: crun/criu/nsenter on the node
+          ports:
+            - {containerPort: 8099, hostPort: 8099, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8099}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: script, mountPath: /opt/agent, readOnly: true}
+      volumes:
+        - name: script
+          configMap: {name: drift-node-agent-script}

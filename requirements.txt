@@ -1,0 +1,23 @@
+# Core dependencies
+requests>=2.31.0
+urllib3>=2.0.0
+pyyaml>=6.0.1
+
+# Ansible — 2.15.x supports Python 3.8 on target nodes (Ubuntu 20.04 edge nodes)
+ansible-core>=2.15.0,<2.16.0
+ansible>=8.0.0,<9.0.0
+
+# Backend
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+websockets>=12.0
+python-multipart>=0.0.9
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.9
+pydantic-settings>=2.0.0
+
+# Optional but useful
+python-dotenv>=1.0.0
+docker>=7.0.0

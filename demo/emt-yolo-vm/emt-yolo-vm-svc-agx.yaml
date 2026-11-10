@@ -1,0 +1,18 @@
+# How the vehicle reaches the YOLO VM on the Orin. The guest sits on the pod
+# network (masquerade), which the vehicle cannot reach over 5G, so kube-proxy
+# maps the Orin's own LAN address to whichever virt-launcher runs the VM:
+# the vehicle switches its stream with `drift-yolo-target edge 10.220.2.170`.
+# No extra IP to reserve with the 5G operator, and the mapping follows the VM
+# (the selector matches the launcher pod after every restart or migration).
+apiVersion: v1
+kind: Service
+metadata:
+  name: emt-yolo-vm
+  namespace: default
+spec:
+  selector:
+    app: emt-yolo-vm
+  externalIPs: ["10.220.2.170"]
+  ports:
+  - { name: frames, port: 5005, targetPort: 5005, protocol: UDP }
+  - { name: http, port: 9000, targetPort: 9000, protocol: TCP }

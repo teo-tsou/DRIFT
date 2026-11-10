@@ -1,0 +1,87 @@
+---
+# Join K3s worker (agent) nodes to an existing K3s server.
+# Required extra-vars: k3s_server_url, k3s_node_token
+
+- name: Bootstrap Python on worker nodes
+  hosts: management_nodes
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Skip non-agent nodes
+      meta: end_host
+      when: "'agent' not in node_roles"
+
+    - name: Ensure Python 3.7+ is available
+      raw: |
+        python3 -c "import sys; exit(0 if sys.version_info >= (3,7) else 1)" 2>/dev/null \
+          || (DEBIAN_FRONTEND=noninteractive apt-get install -y python3 >/dev/null 2>&1)
+      changed_when: false
+      failed_when: false
+
+- name: Join K3s Worker Nodes
+  hosts: management_nodes
+  become: true
+  gather_facts: true
+  vars:
+    k3s_version: "{{ kubernetes_version | default('v1.34.5+k3s1') }}"
+    ansible_ssh_pipelining: true
+    ansible_command_timeout: 60
+    ansible_become_timeout: 30
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10'
+
+  pre_tasks:
+    - name: Verify required variables
+      assert:
+        that:
+          - k3s_server_url is defined
+          - k3s_node_token is defined
+        fail_msg: "k3s_server_url and k3s_node_token must be provided"
+      when: "'agent' in node_roles"
+
+  tasks:
+    - name: Skip non-agent nodes
+      meta: end_host
+      when: "'agent' not in node_roles"
+
+    - name: Check if K3s agent is already running
+      shell: systemctl is-active k3s-agent 2>/dev/null || echo inactive
+      register: k3s_agent_status
+      changed_when: false
+      failed_when: false
+      timeout: 10
+
+    - name: Clean previous K3s agent install if present
+      shell: |
+        if [ -f /usr/local/bin/k3s-agent-uninstall.sh ]; then
+          /usr/local/bin/k3s-agent-uninstall.sh 2>/dev/null || true
+        elif [ -f /usr/local/bin/k3s-uninstall.sh ]; then
+          /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
+        fi
+        rm -rf /etc/rancher/k3s /var/lib/rancher/k3s /run/k3s /run/flannel
+        rm -rf /etc/cni /opt/cni
+        systemctl daemon-reload 2>/dev/null || true
+      when: k3s_agent_status.stdout != 'inactive'
+      changed_when: false
+      failed_when: false
+      timeout: 120
+
+    - name: Join K3s cluster as agent
+      shell: |
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="{{ k3s_version }}" \
+          K3S_URL="{{ k3s_server_url }}" \
+          K3S_TOKEN="{{ k3s_node_token }}" \
+          sh -s - agent \
+          --node-name "{{ inventory_hostname }}"
+      timeout: 300
+      changed_when: true
+
+    - name: Verify K3s agent is running
+      shell: systemctl is-active k3s-agent
+      register: agent_active
+      until: agent_active.stdout == 'active'
+      retries: 6
+      delay: 5
+      changed_when: false
+      failed_when: agent_active.stdout != 'active'
+      timeout: 60

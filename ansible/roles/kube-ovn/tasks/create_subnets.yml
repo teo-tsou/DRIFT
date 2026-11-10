@@ -1,0 +1,52 @@
+---
+# Creates one kubeovn.io/v1 Subnet CRD per ovn_networks entry.
+# Idempotent — uses kubectl apply.
+
+- name: Write OVN Subnet YAML to temp file
+  copy:
+    content: "{{ lookup('template', 'subnet.yaml.j2') }}"
+    dest: "/tmp/ovn-subnet-{{ network.name | lower | replace('_', '-') | replace(' ', '-') }}.yaml"
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  run_once: true
+
+- name: Apply OVN Subnet CRDs
+  shell:
+    cmd: |
+      kubectl --kubeconfig {{ kubeconfig }} apply -f \
+        /tmp/ovn-subnet-{{ network.name | lower | replace('_', '-') | replace(' ', '-') }}.yaml
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  changed_when: true
+  run_once: true
+
+- name: Remove temp Subnet YAML files
+  file:
+    path: "/tmp/ovn-subnet-{{ network.name | lower | replace('_', '-') | replace(' ', '-') }}.yaml"
+    state: absent
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  run_once: true
+
+- name: Wait for Subnets to be ready
+  shell:
+    cmd: |
+      kubectl --kubeconfig {{ kubeconfig }} get subnet \
+        {{ network.name | lower | replace('_', '-') | replace(' ', '-') }} \
+        -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null
+  register: subnet_ready
+  until: subnet_ready.stdout == "True"
+  retries: 20
+  delay: 5
+  changed_when: false
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  run_once: true

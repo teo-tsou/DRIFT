@@ -1,0 +1,84 @@
+---
+- name: Wait for all nodes to be Ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    kubeconfig: "{{ kubeconfig_path }}"
+  register: nodes
+  until: nodes.resources | selectattr('status.conditions', 'defined') | 
+         selectattr('status.conditions', 'selectattr', 'type', 'equalto', 'Ready') |
+         selectattr('status.conditions', 'selectattr', 'status', 'equalto', 'True') |
+         list | length == groups['management_nodes'] | length
+  retries: 30
+  delay: 10
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Check Longhorn system health
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: longhorn-system
+    label_selectors:
+      - app=longhorn-manager
+    kubeconfig: "{{ kubeconfig_path }}"
+  register: longhorn_pods
+  failed_when: >
+    longhorn_pods.resources | 
+    selectattr('status.phase', 'equalto', 'Running') | 
+    list | length == 0
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  when: install_longhorn | default(true)
+
+- name: Check KubeVirt health
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: KubeVirt
+    name: kubevirt
+    namespace: kubevirt
+    kubeconfig: "{{ kubeconfig_path }}"
+  register: kubevirt_cr
+  failed_when: >
+    kubevirt_cr.resources[0].status.conditions |
+    selectattr('type', 'equalto', 'Available') |
+    selectattr('status', 'equalto', 'True') |
+    list | length == 0
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  when: install_kubevirt | default(true)
+
+- name: Verify bridge networking
+  shell: |
+    brctl show {{ bridge_name }} && \
+    ip link show {{ bridge_name }} | grep -q "state UP"
+  register: bridge_check
+  failed_when: bridge_check.rc != 0
+  changed_when: false
+
+- name: Test Multus CNI
+  kubernetes.core.k8s_info:
+    api_version: k8s.cni.cncf.io/v1
+    kind: NetworkAttachmentDefinition
+    name: "{{ bridge_name }}-network"
+    namespace: default
+    kubeconfig: "{{ kubeconfig_path }}"
+  register: nad_check
+  failed_when: nad_check.resources | length == 0
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  when: install_multus | default(true)
+
+- name: Final health check summary
+  debug:
+    msg: |
+      🎉 Management Cluster Health Check Summary:
+      ✅ All nodes are Ready
+      ✅ Longhorn storage is healthy
+      ✅ KubeVirt virtualization is ready  
+      ✅ Bridge networking is configured
+      ✅ Multus CNI is functional
+      
+      Cluster {{ cluster_name }} is ready for workload deployment!
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"

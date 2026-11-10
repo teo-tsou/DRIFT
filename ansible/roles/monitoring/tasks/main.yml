@@ -1,0 +1,88 @@
+---
+- name: Run preflight checks
+  include_tasks: preflight.yml
+
+- name: Check if Helm is installed
+  command: helm version --short
+  register: helm_check
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Install Helm if not present
+  block:
+    - name: Download Helm installation script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+
+    - name: Install Helm
+      command: /tmp/get_helm.sh
+      environment:
+        DESIRED_VERSION: "v3.13.0"
+
+    - name: Remove Helm installation script
+      file:
+        path: /tmp/get_helm.sh
+        state: absent
+  when: helm_check.rc != 0
+
+- name: Verify Helm installation
+  command: helm version --short
+  register: helm_version
+  changed_when: false
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Display Helm version
+  debug:
+    msg: "Helm version: {{ helm_version.stdout }}"
+
+- name: Create monitoring namespace
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml create namespace {{ monitoring_namespace }} \
+      --dry-run=client -o yaml | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f -
+  changed_when: false
+
+- name: Add Prometheus Helm repository
+  command: helm repo add prometheus-community {{ prometheus_chart_repo }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+  failed_when: false
+
+- name: Update Helm repositories
+  command: helm repo update
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+- name: Include Prometheus deployment tasks
+  include_tasks: prometheus.yml
+
+- name: Wait for Prometheus pods to be running
+  shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml wait pod \
+      -n {{ monitoring_namespace }} \
+      -l "app.kubernetes.io/name=prometheus" \
+      --for=condition=Ready --timeout=120s
+  changed_when: false
+  failed_when: false
+
+- name: Get node IP for access information
+  set_fact:
+    node_ip: "{{ ansible_default_ipv4.address }}"
+
+- name: Display Prometheus access information
+  debug:
+    msg:
+      - "✅ Prometheus metrics stack deployed successfully!"
+      - ""
+      - "📈 Prometheus UI:"
+      - "  URL: http://{{ node_ip }}:30090"
+      - ""
+      - "🔧 Cluster Configuration:"
+      - "  Nodes: {{ node_count }}"
+      - "  Longhorn Replicas: {{ optimal_replica_count }}"
