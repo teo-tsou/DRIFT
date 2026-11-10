@@ -1,0 +1,8 @@
+[Unit]
+Description=DRIFT keep the 5G egress table on wwan0
+After=drift-quectel-cm.service
+[Service]
+ExecStart=/usr/local/sbin/drift-5g-route
+Restart=always
+[Install]
+WantedBy=multi-user.target

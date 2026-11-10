@@ -1,0 +1,157 @@
+---
+# Prepare a PAIR of edge clusters for KubeVirt decentralized cross-cluster
+# live migration. Idempotent. virt-operator MUST stay running — it is what
+# merges the injected peer CA into kubevirt-ca and keeps the synchronization
+# addresses current.
+#
+# Required per-host vars (set in inventory):
+#   cluster_pod_cidr : this cluster's pod CIDR (e.g. 10.42.0.0/16)
+#   peer_host        : inventory hostname of the other cluster's server node
+
+- name: Resolve the peer list (peer_hosts for a mesh, else [peer_host])
+  set_fact:
+    xc_peers: "{{ peer_hosts | default([peer_host] if (peer_host is defined) else []) }}"
+  tags: [always]
+
+- name: Validate required mesh vars
+  assert:
+    that:
+      - cluster_pod_cidr is defined
+      - xc_peers | length > 0
+      - xc_peers | map('extract', hostvars) | map(attribute='cluster_pod_cidr') | list | length == (xc_peers | length)
+    fail_msg: >-
+      xcluster_migration requires cluster_pod_cidr on every host and peer_hosts
+      (or peer_host) listing the other cluster server(s), each with cluster_pod_cidr.
+  tags: [always]
+
+# ── 1. KubeVirt: feature gate + stream TLS + single infra replica ────────────
+# infra.replicas=1 gives exactly one virt-synchronization-controller pod, so its
+# pod IP is an unambiguous, current sync endpoint. With the default 2 replicas
+# only the leader serves :9185 and the peer also discovers the non-leader
+# replica, dialing a refused endpoint that stalls the sync handshake.
+- name: Enable feature gate + stream TLS + single infra replica
+  shell: >-
+    kubectl patch kubevirt kubevirt -n {{ kubevirt_namespace }} --type=merge -p
+    '{"spec":{"infra":{"replicas":1},"configuration":{
+      "developerConfiguration":{"featureGates":["DecentralizedLiveMigration"]},
+      "migrations":{"disableTLS":{{ xcluster_disable_stream_tls | lower }},"network":null}}}}'
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+
+- name: Wait for KubeVirt to report Available after config change
+  shell: kubectl wait kubevirt/kubevirt -n {{ kubevirt_namespace }} --for=condition=Available --timeout=180s
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: false
+
+- name: Confirm synchronizationAddresses is populated (feature gate active)
+  shell: kubectl get kubevirt kubevirt -n {{ kubevirt_namespace }} -o jsonpath='{.status.synchronizationAddresses[0]}'
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: sync_addr
+  until: sync_addr.stdout | regex_search(':' ~ xcluster_sync_port ~ '$')
+  retries: 12
+  delay: 5
+  changed_when: false
+
+# ── 2. Persistent cross-cluster pod-CIDR route (systemd unit + timer) ─────────
+- name: Install cross-cluster route systemd unit
+  template:
+    src: drift-xcluster-route.service.j2
+    dest: /etc/systemd/system/drift-xcluster-route.service
+    mode: "0644"
+  register: route_unit
+  notify: reload systemd
+
+- name: Remove obsolete route re-assert timer (replaced by long-running service)
+  file:
+    path: /etc/systemd/system/drift-xcluster-route.timer
+    state: absent
+  notify: reload systemd
+
+- name: Flush handlers so unit files are loaded before enabling
+  meta: flush_handlers
+
+- name: Enable + (re)start cross-cluster route re-asserter
+  systemd:
+    name: drift-xcluster-route.service
+    enabled: true
+    state: "{{ 'restarted' if route_unit is changed else 'started' }}"
+
+- name: Verify a peer sync endpoint is reachable over the route (best-effort)
+  shell: >-
+    timeout 5 bash -c 'cat </dev/null >/dev/tcp/{{ hostvars[peer_host].sync_endpoint_ip }}/{{ xcluster_sync_port }}'
+  when:
+    - peer_host is defined
+    - hostvars[peer_host].sync_endpoint_ip is defined
+  changed_when: false
+  failed_when: false
+  register: peer_reach
+
+# ── 3. CA exchange (operator merges external-ca -> kubevirt-ca) ──────────────
+# Read each cluster's own kubevirt-ca, then write the PEER's bundle into this
+# cluster's kubevirt-external-ca. virt-operator (running) merges it into
+# kubevirt-ca (dedup + drops expired) and clears external-ca. The sync
+# controller trusts the peer via kubevirt-ca, which it watches live.
+# These CA tasks are tagged `ca` so they can be re-run on their own as a fast,
+# periodic refresh (KubeVirt rotates its internal CA ~hourly; the peer's merged
+# copy must be renewed before it goes stale):
+#   ansible-playbook ... prepare_xcluster_migration.yml --tags ca
+- name: Read this cluster's kubevirt-ca bundle
+  shell: kubectl get cm kubevirt-ca -n {{ kubevirt_namespace }} -o jsonpath='{.data.ca-bundle}'
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: own_ca
+  changed_when: false
+  tags: [ca]
+
+- name: Stage ALL peer CA bundles on this host (union — one bundle per peer)
+  copy:
+    content: |
+      {% for ph in xc_peers %}{{ hostvars[ph].own_ca.stdout }}
+      {% endfor %}
+    dest: /tmp/drift-peer-kubevirt-ca.pem
+    mode: "0600"
+  tags: [ca]
+
+- name: Inject peer CA into kubevirt-external-ca (operator merges into kubevirt-ca)
+  shell: >-
+    kubectl create configmap kubevirt-external-ca -n {{ kubevirt_namespace }}
+    --from-file=ca-bundle=/tmp/drift-peer-kubevirt-ca.pem
+    --dry-run=client -o yaml | kubectl apply -f -
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  changed_when: true
+  tags: [ca]
+
+- name: Wait (best-effort) for operator to merge peer CA into kubevirt-ca
+  # On some KubeVirt builds virt-operator's external-ca merge is effectively a
+  # no-op (external-ca never drains, kubevirt-ca is reset to its own certs). That
+  # is EXPECTED and must NOT fail mesh wiring: the backend's cross-cluster engine
+  # re-establishes CA trust TRANSIENTLY before each VM migration (_ensure_ca_trust:
+  # freeze operator -> write the CA union into both clusters -> migrate -> restore),
+  # which is the robust path for a build that rotates/resets kubevirt-ca. So this
+  # only PRE-WARMS the trust; a non-merging operator is fine.
+  shell: |
+    OWN=$(kubectl get cm kubevirt-ca -n "$NS" -o jsonpath='{.data.ca-bundle}' | grep -c 'BEGIN CERT')
+    EXT=$(kubectl get cm kubevirt-external-ca -n "$NS" -o jsonpath='{.data.ca-bundle}' 2>/dev/null | grep -c 'BEGIN CERT')
+    echo "kubevirt-ca=$OWN external-ca=$EXT"
+    test "$EXT" -eq 0 -a "$OWN" -ge 2
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+    NS: "{{ kubevirt_namespace }}"
+  register: ca_merge
+  until: ca_merge.rc == 0
+  retries: 6
+  delay: 5
+  changed_when: false
+  failed_when: false
+  tags: [ca]
+
+- name: Report CA pre-warm state (trust is finalised by the backend at migration time)
+  debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ ca_merge.stdout | default('n/a') }}
+      ({{ 'peer CA merged' if ca_merge.rc == 0 else 'operator did not merge — backend establishes trust at migration time' }})
+  tags: [ca]

@@ -1,0 +1,98 @@
+# Prometheus Operator Configuration
+prometheusOperator:
+  enabled: true
+
+# Prometheus Configuration
+prometheus:
+  enabled: true
+  prometheusSpec:
+    retention: {{ prometheus_retention }}
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: {{ prometheus_storage_class }}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: {{ prometheus_storage_size }}
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    
+    additionalScrapeConfigs:
+      - job_name: 'kubevirt-vms'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - kubevirt
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_kubevirt_io]
+            action: keep
+            regex: virt-launcher
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: metrics
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+# Grafana is intentionally disabled — the platform ships metrics via Prometheus only.
+grafana:
+  enabled: false
+
+# Alertmanager Configuration
+alertmanager:
+  enabled: {{ enable_alertmanager | lower }}
+{% if enable_alertmanager %}
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: {{ alertmanager_storage_class }}
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: {{ alertmanager_storage_size }}
+{% endif %}
+
+# Node Exporter
+nodeExporter:
+  enabled: true
+
+# Kube State Metrics
+kubeStateMetrics:
+  enabled: true
+
+# Default service monitors and rules
+defaultRules:
+  create: true
+  rules:
+    alertmanager: true
+    etcd: true
+    general: true
+    k8s: true
+    kubeApiserver: true
+    kubeApiserverAvailability: true
+    kubeApiserverBurnrate: true
+    kubeApiserverHistogram: true
+    kubeApiserverSlos: true
+    kubeControllerManager: true
+    kubelet: true
+    kubeProxy: true
+    kubePrometheusGeneral: true
+    kubePrometheusNodeRecording: true
+    kubernetesApps: true
+    kubernetesResources: true
+    kubernetesStorage: true
+    kubernetesSystem: true
+    kubeScheduler: true
+    kubeStateMetrics: true
+    network: true
+    node: true
+    nodeExporterAlerting: true
+    nodeExporterRecording: true
+    prometheus: true
+    prometheusOperator: true

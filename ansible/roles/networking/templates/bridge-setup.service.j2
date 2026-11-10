@@ -1,0 +1,17 @@
+[Unit]
+Description=Setup Network Bridge on Boot
+After=network.target
+Before=kubelet.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/local/bin/setup-bridge.sh
+RemainAfterExit=true
+StandardOutput=journal
+StandardError=journal
+Environment="BRIDGE_NAME={{ bridge_name | default('br0') }}"
+Environment="PRIMARY_INTERFACE={{ primary_interface | default('eth0') }}"
+Environment="VLAN_ID={{ vlan_id | default('200') }}"
+
+[Install]
+WantedBy=multi-user.target

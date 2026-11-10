@@ -1,0 +1,69 @@
+---
+# Creates one Multus NetworkAttachmentDefinition per ovn_networks entry.
+# VMs reference these NADs to attach secondary interfaces backed by OVN.
+# Skipped gracefully if Multus CRDs are not yet installed.
+
+- name: Check if Multus NetworkAttachmentDefinition CRD is installed
+  shell:
+    cmd: kubectl --kubeconfig {{ kubeconfig }} get crd network-attachment-definitions.k8s.cni.cncf.io --no-headers 2>/dev/null
+  register: multus_crd_check
+  changed_when: false
+  failed_when: false
+  run_once: true
+
+- name: Skip NAD creation if Multus is not installed yet
+  debug:
+    msg: "Multus CRDs not found — skipping NAD creation (will be created after Multus is installed)"
+  when: multus_crd_check.rc != 0
+  run_once: true
+
+- name: Write OVN NAD YAML to temp file
+  copy:
+    content: "{{ lookup('template', 'nad-ovn.yaml.j2') }}"
+    dest: "/tmp/ovn-nad-{{ network.name | lower | replace('_', '-') | replace(' ', '-') }}.yaml"
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  when: multus_crd_check.rc == 0
+  run_once: true
+
+- name: Apply OVN NADs
+  shell:
+    cmd: |
+      kubectl --kubeconfig {{ kubeconfig }} apply -f \
+        /tmp/ovn-nad-{{ network.name | lower | replace('_', '-') | replace(' ', '-') }}.yaml
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  when: multus_crd_check.rc == 0
+  changed_when: true
+  run_once: true
+
+- name: Remove temp NAD YAML files
+  file:
+    path: "/tmp/ovn-nad-{{ network.name | lower | replace('_', '-') | replace(' ', '-') }}.yaml"
+    state: absent
+  loop: "{{ ovn_networks }}"
+  loop_control:
+    loop_var: network
+    label: "{{ network.name }}"
+  when: multus_crd_check.rc == 0
+  run_once: true
+
+- name: Verify NADs created
+  shell:
+    cmd: |
+      kubectl --kubeconfig {{ kubeconfig }} get network-attachment-definitions \
+        -A --no-headers 2>/dev/null | grep ovn || true
+  register: nad_list
+  changed_when: false
+  failed_when: false
+  run_once: true
+  when: multus_crd_check.rc == 0
+
+- name: Show NAD status
+  debug:
+    msg: "{{ nad_list.stdout_lines | default(['NADs skipped — Multus not installed yet']) }}"
+  run_once: true

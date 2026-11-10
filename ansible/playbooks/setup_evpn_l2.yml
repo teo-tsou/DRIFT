@@ -1,0 +1,27 @@
+---
+# Set up an EVPN stretched-L2 segment across the edge cluster pair, so a VM can
+# keep its IP across a cross-cluster live migration.
+#
+#   ansible-playbook -i inventories/xcluster/hosts.yml playbooks/setup_evpn_l2.yml
+#
+# Runs against the `xcluster_pair` group (the two cluster server nodes). Each
+# host needs ansible_host (underlay IP) and peer_host set (see the sample
+# inventory used by prepare_xcluster_migration.yml).
+
+- name: EVPN stretched L2 across the edge cluster pair
+  hosts: xcluster_pair
+  become: true
+  gather_facts: false
+  vars:
+    ansible_ssh_pipelining: true
+  # k3s puts kubectl at /usr/local/bin; a non-login ansible shell may not have it
+  # on PATH (seen on one node: `kubectl apply` -> rc 127). Force PATH + ensure the
+  # symlink so bare `kubectl` in the role works on every node.
+  environment:
+    PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  pre_tasks:
+    - name: Ensure kubectl is available (k3s symlink)
+      shell: command -v kubectl >/dev/null 2>&1 || ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
+      changed_when: false
+  roles:
+    - evpn_l2

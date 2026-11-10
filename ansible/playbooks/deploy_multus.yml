@@ -1,0 +1,16 @@
+---
+# Deploy Multus CNI for multi-network support on management clusters.
+# Requires: kubeconfig at /etc/rancher/k3s/k3s.yaml on the server node.
+# The Multus role uses run_once + delegate_to to operate from the server node.
+
+- name: Deploy Multus CNI
+  hosts: management_nodes
+  become: true
+  gather_facts: false
+  vars:
+    ansible_ssh_pipelining: true
+    ansible_command_timeout: 60
+    ansible_become_timeout: 30
+
+  roles:
+    - multus

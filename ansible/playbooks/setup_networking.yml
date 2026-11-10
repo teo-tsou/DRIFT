@@ -1,0 +1,12 @@
+---
+# Network Setup Playbook for DRIFT Management Clusters
+# This playbook sets up L2 networking for the management cluster
+
+- name: Setup L2 networking for management cluster
+  hosts: management_nodes
+  gather_facts: yes
+  become: yes
+
+  roles:
+    - role: networking
+      when: l2_networks is defined and l2_networks | length > 0

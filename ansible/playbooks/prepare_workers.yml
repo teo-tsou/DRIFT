@@ -1,0 +1,47 @@
+---
+# Prepare worker nodes WHILE KubeOVN is being deployed on the server.
+# The orchestrator runs this in parallel with deploy_kube_ovn.yml so the
+# 2-5 minutes of apt operations and K3s binary download happen for free.
+#
+# What this does:
+#   1. common role: apt update/upgrade, required packages, sysctl, swap off
+#   2. Pre-stage K3s binary: downloads the k3s-agent binary so that when
+#      rancher-system-agent runs the k3s installer it finds the binary already
+#      present and skips the ~70 MB download (saves 1-2 minutes per worker).
+#
+# Safe to run before K3s is installed — does not touch networking or K3s config.
+
+- name: Prepare Worker Nodes
+  hosts: management_nodes
+  become: true
+  gather_facts: true
+  vars:
+    k3s_version: "{{ kubernetes_version | default('v1.34.5+k3s1') }}"
+
+  tasks:
+    - name: Run common role for workers
+      include_role:
+        name: common
+      when: "'agent' in node_roles"
+      ignore_errors: true
+
+    - name: Pre-stage K3s binary on worker nodes
+      # rancher-system-agent installs k3s-agent by running the official install
+      # script.  That script checks if the requested version binary is already
+      # present in /var/lib/rancher/k3s/data/<hash>/ and skips the download if
+      # it is.  By pre-installing here (skip-enable + skip-start) we populate
+      # that cache so the Rancher install step takes seconds instead of minutes.
+      shell: |
+        if command -v k3s &>/dev/null 2>&1; then
+          echo "k3s already installed, skipping pre-stage"
+          exit 0
+        fi
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="{{ k3s_version }}" \
+          INSTALL_K3S_SKIP_ENABLE=true \
+          INSTALL_K3S_SKIP_START=true \
+          sh -s - agent 2>&1 | tail -5
+      when: "'agent' in node_roles"
+      changed_when: false
+      failed_when: false
+      timeout: 180

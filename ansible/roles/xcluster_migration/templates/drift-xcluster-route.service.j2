@@ -1,0 +1,20 @@
+[Unit]
+Description=DRIFT cross-cluster pod-CIDR routes to peer edge clusters ({{ xc_peers | join(', ') }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Long-running re-asserter (simpler and more robust than a oneshot+timer, whose
+# OnUnitActiveSec/OnUnitInactiveSec scheduling is unreliable for a fast oneshot).
+# Re-adds a route to EVERY peer cluster's pod CIDR every {{ xcluster_route_reassert_sec }}s
+# so they survive a DHCP lease renew or CNI event flushing them. `ip route
+# replace` is idempotent. KubeOVN already routes the local pod CIDR into ovn0 and
+# ip_forward is on, so each peer node forwards inbound sync/stream traffic into
+# its overlay.
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/bin/bash -c 'while true; do {% for ph in xc_peers %}/sbin/ip route replace {{ hostvars[ph].cluster_pod_cidr }} via {{ hostvars[ph].ansible_host }}; {% endfor %}sleep {{ xcluster_route_reassert_sec }}; done'
+
+[Install]
+WantedBy=multi-user.target

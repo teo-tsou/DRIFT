@@ -1,0 +1,48 @@
+# EMT YOLO receiver as a very light KubeVirt VM (arm64 containerDisk), for
+# comparison with the CRIU-migrated pod (demo/emt-yolo). Same app, same model,
+# same ports: UDP 5005 in, HTTP 9000 (/health, /stream, /frame, /quiesce).
+# The guest boots straight into the receiver (drift-init as PID 1).
+# containerDisk: the root disk is the image, its writes stay on the node, so a
+# live migration copies RAM plus a small overlay, with no shared storage.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: emt-yolo-vm
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app: emt-yolo-vm
+    spec:
+      evictionStrategy: LiveMigrate
+      terminationGracePeriodSeconds: 0
+      domain:
+        cpu:
+          cores: 8          # the receiver runs 8 inference threads, as the pod
+        memory:
+          guest: 1Gi
+        devices:
+          disks:
+          - name: root
+            disk: { bus: virtio }
+          interfaces:
+          - name: default
+            masquerade: {}
+            ports:
+            - { name: frames, port: 5005, protocol: UDP }
+            - { name: http, port: 9000, protocol: TCP }
+          autoattachGraphicsDevice: false
+          autoattachSerialConsole: true
+        firmware:
+          bootloader:
+            efi: { secureBoot: false }
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: root
+        containerDisk:
+          image: localhost/drift-emt-yolo-vm:latest
+          imagePullPolicy: IfNotPresent

@@ -1,0 +1,78 @@
+# Lightweight migratable VIDEO-SERVER VM (KubeVirt path) — Alpine instead of Fedora
+# so the DataVolume import + cross-cluster disk replication are much smaller/faster.
+# Reachable on the stretched EVPN L2 at 192.170.10.10 (the same network the working
+# demo-vm used). VMs must use drift-evpn, NOT the pod's macvlan-l2 — macvlan filters
+# by MAC and drops a VM's separate MAC; drift-evpn (bridge over EVPN) carries it.
+#
+# Migration model respected: masquerade on the POD network (migratable) + bridge
+# ONLY on the secondary multus (drift-evpn) network. A DataVolume is required by
+# DRIFT's cross-cluster VM engine (the whole disk is replicated).
+#
+# The clip is served by a boot service (/etc/local.d) so it comes back up whether
+# the migration is live (RAM preserved) or cold (VM restarted on the target).
+# Wait for the DV to reach Succeeded and the VMI Running before migrating.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata: { name: demo-vm, namespace: default }
+spec:
+  # runStrategy: Always (NOT `running: true`) — the migration engine's source
+  # fence patches spec.runStrategy -> Halted at cutover; with `running: true` that
+  # patch is a no-op and the deleted source VMI respawns -> split-brain (both edges
+  # run the same VM/IP). This matches the proven demo-vm.
+  runStrategy: Always
+  dataVolumeTemplates:
+  - metadata: { name: demo-vm-dv }
+    spec:
+      source:
+        http: { url: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.7-x86_64-bios-cloudinit-r0.qcow2" }
+      storage:
+        accessModes: [ReadWriteMany]           # RWX — what the engine replicates
+        storageClassName: longhorn-rwx
+        resources: { requests: { storage: 4Gi } }
+  template:
+    metadata: { labels: { kubevirt.io/vm: demo-vm } }
+    spec:
+      domain:
+        resources: { requests: { memory: 512Mi } }
+        devices:
+          disks:
+          - { name: rootdisk, disk: { bus: virtio } }
+          - { name: cloudinitdisk, disk: { bus: virtio } }
+          interfaces:
+          - { name: default, masquerade: {} }  # pod net (migratable)
+          - { name: evpn, bridge: {} }          # stretched EVPN L2 — carries the VM's MAC
+      networks:
+      - { name: default, pod: {} }
+      # drift-evpn is the proper cross-cluster L2 for VMs (bridge over EVPN/VXLAN): it
+      # carries the VM's own MAC, so bridge binding + IP-follow work (macvlan does NOT
+      # — it MAC-filters and drops a VM's separate MAC). This is the network the
+      # working demo-vm used. The guest assigns the EVPN IP below.
+      - { name: evpn, multus: { networkName: default/drift-evpn } }
+      volumes:
+      - { name: rootdisk, dataVolume: { name: demo-vm-dv } }
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            password: alpine
+            chpasswd: { expire: false }
+            ssh_pwauth: true
+            runcmd:
+            - apk add --no-cache python3 curl
+            - |
+              mkdir -p /etc/local.d /srv/video
+              cat > /etc/local.d/videosrv.start <<'EOF'
+              #!/bin/sh
+              # assign the floating IP to the L2 NIC (the one without a DHCP IPv4)
+              IF=$(for i in $(ls /sys/class/net | grep -v lo); do ip -4 addr show "$i" | grep -q "inet " || echo "$i"; done | head -1)
+              [ -n "$IF" ] && { ip link set "$IF" up; ip link set "$IF" mtu 1400; ip addr add 192.170.10.10/24 dev "$IF" 2>/dev/null; }
+              # fetch the clip once (persists on the replicated disk)
+              if [ ! -f /srv/video/loop.webm ]; then
+                curl -sL -A "Mozilla/5.0" "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.240p.vp9.webm" -o /srv/video/loop.webm
+              fi
+              # serve with range support (python http.server >=3.7)
+              pgrep -f "http.server 9000" >/dev/null || setsid python3 -m http.server 9000 --directory /srv/video >/var/log/videosrv.log 2>&1 &
+              EOF
+              chmod +x /etc/local.d/videosrv.start
+            - rc-update add local default
+            - /etc/local.d/videosrv.start

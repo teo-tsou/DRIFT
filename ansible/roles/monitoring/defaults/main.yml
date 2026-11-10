@@ -1,0 +1,20 @@
+---
+# Namespace for monitoring stack
+monitoring_namespace: monitoring
+
+# Prometheus configuration
+prometheus_release_name: prometheus
+prometheus_chart_repo: https://prometheus-community.github.io/helm-charts
+prometheus_chart_name: kube-prometheus-stack
+prometheus_chart_version: "55.5.0"  # Adjust to latest stable version
+prometheus_retention: 15d
+prometheus_storage_size: 15Gi
+prometheus_storage_class: longhorn  # Changed from local-path to longhorn
+
+# KubeVirt metrics
+enable_kubevirt_monitoring: true
+
+# Alerting
+enable_alertmanager: true
+alertmanager_storage_size: 5Gi
+alertmanager_storage_class: longhorn  # Added explicit Alertmanager storage class

@@ -1,0 +1,9 @@
+---
+- name: Deploy Prometheus Metrics Stack
+  hosts: management_nodes[0]
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Deploy monitoring stack
+      include_role:
+        name: monitoring

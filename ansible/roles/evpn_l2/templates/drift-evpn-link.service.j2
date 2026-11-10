@@ -1,0 +1,13 @@
+[Unit]
+Description=DRIFT EVPN stretched-L2 (bridge {{ evpn_bridge }} + VXLAN VNI {{ evpn_vni }})
+After=network-online.target
+Wants=network-online.target
+Before=frr.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/drift-evpn-link.sh
+
+[Install]
+WantedBy=multi-user.target

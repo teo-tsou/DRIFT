@@ -1,0 +1,42 @@
+#!/bin/sh
+# drift-5g-route: keeps the vehicle Jetson's 5G-only paths in place. Runs as
+# the drift-5g-route systemd service (every 5 s), because the kernel deletes
+# every route on wwan0 whenever the modem drops and quectel-CM reconnects.
+#  * table 145 = default via wwan0, used by the WireGuard tunnel's own packets
+#    (fwmark 0x45) and by anything sourced from the UE address.
+#  * the edge node's InternalIP (EDGE_IP), which bulk checkpoint streams dial:
+#    over the tunnel or over raw wwan0, per /etc/drift-bulk-path (see
+#    drift-bulk-path). An unreachable fallback with a high metric means a lost
+#    wwan0 route never lets that traffic fall back to the LAN port, which shares
+#    the edge's subnet.
+#  * the camera stream's edge target (YOLO's floating IP, from drift-yolo-target's
+#    state file) while YOLO runs on an edge: on wwan0, with the same unreachable
+#    fallback. drift-yolo-target adds this route on a switch, but a modem drop
+#    deletes it, and the stream then silently left over the LAN (2026-10-26).
+EDGE_IP=${EDGE_IP:-10.220.2.170}
+# A checkpoint delta is one ~2 MiB burst: start it with a 64-segment window
+# instead of slow-starting from 10 over a ~45 ms RTT.
+BURST="initcwnd 64 initrwnd 64"
+YOLO_STATE=/run/drift-yolo-target
+yolo_ip=""
+while :; do
+  ip route show "$EDGE_IP/32" | grep -q unreachable || ip route add unreachable "$EDGE_IP/32" metric 4000
+  ue=$(ip -4 -o addr show wwan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+  if [ -n "$ue" ]; then
+    ip route show table 145 | grep -q "dev wwan0" || ip route replace default dev wwan0 table 145
+    ip rule show | grep -q "from $ue lookup 145" || ip rule add from "$ue" lookup 145 priority 100
+    case "$(cat /etc/drift-bulk-path 2>/dev/null || echo tunnel)" in
+      5g) ip route show "$EDGE_IP/32" | grep -q "dev wwan0.*initcwnd" || ip route replace "$EDGE_IP/32" dev wwan0 $BURST ;;
+      *)  ip route show "$EDGE_IP/32" | grep -q "dev drift5g.*initcwnd" || ip route replace "$EDGE_IP/32" dev drift5g $BURST ;;
+    esac
+  fi
+  set -- $(cat "$YOLO_STATE" 2>/dev/null)
+  if [ "${1:-}" = edge ] && [ -n "${2:-}" ]; then
+    [ "$yolo_ip" = "$2" ] || { [ -n "$yolo_ip" ] && ip route del unreachable "$yolo_ip/32" 2>/dev/null; yolo_ip=$2; }
+    ip route show "$yolo_ip/32" | grep -q unreachable || ip route add unreachable "$yolo_ip/32" metric 4000
+    [ -n "$ue" ] && { ip route show "$yolo_ip/32" | grep -q "dev wwan0" || ip route replace "$yolo_ip/32" dev wwan0; }
+  elif [ -n "$yolo_ip" ]; then
+    ip route del unreachable "$yolo_ip/32" 2>/dev/null; yolo_ip=""
+  fi
+  sleep 5
+done

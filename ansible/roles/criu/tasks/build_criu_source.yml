@@ -1,0 +1,41 @@
+---
+# Fallback: build CRIU from source when the PPA lacks a build for this Ubuntu
+# release. `make install` (PREFIX=/usr/local) provides everything the PPA would:
+# the criu binary (/usr/local/sbin), libcriu.so.2 (/usr/local/lib), and the dev
+# headers + criu.pc — so the later crun-drift build finds libcriu via pkg-config
+# without an apt libcriu-dev package.
+
+- name: Install CRIU build dependencies
+  apt:
+    name: "{{ criu_build_deps }}"
+    state: present
+    update_cache: true
+
+- name: Clone CRIU source
+  git:
+    repo: "{{ criu_git_url }}"
+    dest: "{{ criu_build_dir }}"
+    version: "{{ criu_source_version }}"
+    force: true
+
+- name: Build CRIU
+  shell: |
+    set -o pipefail
+    cd {{ criu_build_dir }}
+    make -j"$(nproc)"
+  args:
+    executable: /bin/bash
+    creates: "{{ criu_build_dir }}/criu/criu"
+
+- name: Install CRIU (binary + libcriu.so.2 + dev headers under /usr/local)
+  command: make install PREFIX=/usr/local
+  args:
+    chdir: "{{ criu_build_dir }}"
+
+- name: Refresh the dynamic linker cache so libcriu.so.2 is resolvable
+  command: ldconfig
+  changed_when: false
+
+- name: Confirm the source-built criu is on PATH
+  command: criu --version
+  changed_when: false

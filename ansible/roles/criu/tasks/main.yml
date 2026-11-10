@@ -1,0 +1,108 @@
+---
+# Install CRIU from the upstream PPA and verify container checkpoint/restore
+# readiness on an edge node. Idempotent: re-running is a no-op once installed.
+
+# A node that already has criu (the Jetsons, from the kernel bring-up) skips
+# the PPA entirely: a Launchpad timeout there otherwise falls through to a
+# source build that cannot succeed on L4T.
+- name: Detect an existing CRIU
+  command: criu --version
+  register: criu_preinstalled
+  changed_when: false
+  failed_when: false
+
+- name: Ensure PPA tooling is present
+  apt:
+    name:
+      - software-properties-common
+      - python3-apt
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: criu_preinstalled.rc != 0
+
+# Install CRIU from the PPA; if this release has no PPA build (or the PPA is
+# unreachable), fall back to building it from source. On noble the PPA path
+# succeeds (criu 4.2.1) — the rescue is insurance for other releases.
+- name: Install CRIU (PPA, with source-build fallback)
+  when: criu_preinstalled.rc != 0
+  block:
+    - name: Add the CRIU PPA (no criu in the focal/noble archive)
+      apt_repository:
+        repo: "{{ criu_ppa }}"
+        state: present
+        update_cache: true
+
+    - name: Install CRIU from the PPA
+      apt:
+        name: "{{ criu_package }}"
+        state: present
+  rescue:
+    - name: PPA has no build for this release — build CRIU from source
+      include_tasks: build_criu_source.yml
+
+- name: Record CRIU version
+  command: criu --version
+  register: criu_version
+  changed_when: false
+
+- name: Probe kernel/criu feature readiness (criu check)
+  command: criu check
+  register: criu_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail if criu check reports the kernel cannot checkpoint/restore
+  assert:
+    that: criu_check.rc == 0
+    fail_msg: >-
+      criu check failed (rc={{ criu_check.rc }}): {{ criu_check.stderr | default('') }}.
+      The kernel is missing checkpoint/restore features criu needs.
+    success_msg: "criu check passed — kernel supports checkpoint/restore"
+
+# ── container-runtime side: the CRI must expose the checkpoint API ────────────
+- name: Verify crictl exposes the checkpoint API
+  command: crictl checkpoint --help
+  register: crictl_ckpt
+  changed_when: false
+  failed_when: false
+
+- name: Detect the kubelet ContainerCheckpoint feature gate
+  shell: |
+    set -o pipefail
+    ps -eo args | grep -m1 '[k]ubelet' | grep -o 'feature-gates=[^ ]*' || true
+  args:
+    executable: /bin/bash
+  register: kubelet_gates
+  changed_when: false
+
+- name: Report CRIU / checkpoint readiness
+  debug:
+    msg: >-
+      {{ inventory_hostname }}: {{ criu_version.stdout }} |
+      criu check: OK |
+      crictl checkpoint: {{ 'available' if crictl_ckpt.rc == 0 else 'MISSING' }} |
+      kubelet gates: {{ kubelet_gates.stdout | default('(default; ContainerCheckpoint beta on in k8s 1.31)', true) }}
+
+- name: Ensure /etc/criu exists
+  file:
+    path: /etc/criu
+    state: directory
+    mode: "0755"
+
+- name: CRIU global config — tolerate request churn at freeze time
+  # A workload that receives frequent short connections (health probes, the demo
+  # stamp polling) almost always has a half-open connection in a listen backlog
+  # at the freeze instant, and CRIU then aborts the dump ("inet: In-flight
+  # connection"). skip-in-flight drops those handshakes at checkpoint — clients
+  # simply retry — instead of failing the whole migration.
+  copy:
+    dest: /etc/criu/default.conf
+    content: "skip-in-flight\n"
+    mode: "0644"
+
+- name: Mark node CRIU-ready
+  copy:
+    dest: /etc/drift-criu-ready
+    content: "{{ criu_version.stdout }}\n"
+    mode: "0644"

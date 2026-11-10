@@ -1,0 +1,16 @@
+[Unit]
+Description=DRIFT in-car view: relay the YOLO viewer from wherever it runs
+# What a passenger sees: the annotated dashcam stream, fetched FROM the vehicle
+# wherever YOLO runs (drift-yolo-target's state). The relay keeps the viewer's
+# stream open and switches its upstream itself on a migration; the hub's backend
+# proxies 10.250.0.2:8090 to the GUI. Bound to the tunnel address only.
+After=wg-quick@drift5g.service
+Wants=wg-quick@drift5g.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/sbin/drift-yolo-view
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

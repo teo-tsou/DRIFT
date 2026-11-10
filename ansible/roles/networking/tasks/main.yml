@@ -1,0 +1,12 @@
+---
+- name: Discover available bridge names
+  include_tasks: discover_bridge_name.yml
+
+- name: Configure VLAN interface
+  include_tasks: configure_vlan.yml
+
+- name: Create and configure bridge
+  include_tasks: configure_bridge.yml
+
+- name: Persist network configuration
+  include_tasks: persist_config.yml

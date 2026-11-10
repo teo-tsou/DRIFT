@@ -1,0 +1,28 @@
+---
+# Per-cluster CRIU pod live-migration layer, run by the DRIFT orchestrator after
+# the base cluster + addons when a cluster is created with container_runtime=crio.
+# Installs crun-drift (+CRIU), mounts the shared NFS checkpoint store, deploys the
+# drift-node-agent (shared token) and the macvlan-l2 NAD, and drops the
+# drift-pod-migrate controller CLI. Targets the orchestrator's `management_nodes`
+# group (the cluster's server + any workers).
+#
+# Extra-vars the orchestrator passes:
+#   ckpt_nfs_server   the hub (drift0) that exports /srv/drift-ckpt
+#   node_agent_token  a token shared across both edge clusters
+- name: CRIU pod live-migration layer (per cluster)
+  hosts: management_nodes
+  become: true
+  gather_facts: true
+  vars:
+    ansible_ssh_pipelining: true
+  # k3s puts kubectl at /usr/local/bin; a non-login ansible shell may lack it on
+  # PATH (rc 127), which silently skips the node-agent + macvlan-l2 NAD creation.
+  # Force PATH + ensure the symlink so the role's kubectl calls resolve everywhere.
+  environment:
+    PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  pre_tasks:
+    - name: Ensure kubectl is available (k3s symlink)
+      shell: command -v kubectl >/dev/null 2>&1 || ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
+      changed_when: false
+  roles:
+    - pod_migration

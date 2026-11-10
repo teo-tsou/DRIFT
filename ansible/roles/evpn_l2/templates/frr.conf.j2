@@ -1,0 +1,23 @@
+frr defaults traditional
+hostname {{ inventory_hostname }}
+log syslog informational
+service integrated-vtysh-config
+!
+{# Mesh: peer with every other cluster node. Back-compat: single peer_host. #}
+{% set _peers = peer_hosts | default([peer_host]) %}
+router bgp {{ evpn_bgp_as }}
+ bgp router-id {{ ansible_host }}
+ no bgp default ipv4-unicast
+{% for ph in _peers %}
+ neighbor {{ hostvars[ph].ansible_host }} remote-as {{ evpn_bgp_as }}
+{% endfor %}
+ !
+ address-family l2vpn evpn
+{% for ph in _peers %}
+  neighbor {{ hostvars[ph].ansible_host }} activate
+{% endfor %}
+  advertise-all-vni
+ exit-address-family
+!
+line vty
+!

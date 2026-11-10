@@ -1,0 +1,15 @@
+---
+# Install CRIU + verify container checkpoint/restore readiness on the edge
+# nodes — the basis for same-architecture pod live-migration.
+#
+#   ansible-playbook -i inventories/xcluster/hosts.yml playbooks/setup_criu.yml
+#
+# Runs against the `xcluster_pair` group (the edge cluster server nodes).
+- name: CRIU / container checkpoint-restore on the edge nodes
+  hosts: xcluster_pair
+  become: true
+  gather_facts: false
+  vars:
+    ansible_ssh_pipelining: true
+  roles:
+    - criu

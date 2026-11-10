@@ -1,0 +1,19 @@
+#!/bin/sh
+# drift-dashcam-scene day|afternoon|night|show: which recorded drive the vehicle's dashcam
+# sender replays, so the scenario's time of day matches the video (the EMT
+# dataset has day highway drives and night/rain drives; "afternoon" is the
+# second daylight drive, video_125233, as the dataset has no dusk footage).
+# The sender replays /srv/emt/scene, a link into /srv/emt/scenes/<scene>, and
+# re-reads the link before every frame: re-pointing it switches the drive at the
+# next frame, with no restart (a restart cost seconds plus the kubelet's
+# growing back-off on repeated switches).
+set -eu
+BASE=/srv/emt
+case "${1:-show}" in
+  show) readlink $BASE/scene | sed 's|scenes/||'; exit 0 ;;
+  day|afternoon|night) ;;
+  *) echo "usage: $0 day|afternoon|night|show" >&2; exit 2 ;;
+esac
+[ -d "$BASE/scenes/$1" ] || { echo "no $BASE/scenes/$1" >&2; exit 1; }
+ln -sfn "scenes/$1" $BASE/scene
+echo "dashcam scene: $1"

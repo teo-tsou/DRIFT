@@ -1,0 +1,67 @@
+# EMT YOLO receiver on the vehicle Jetson: emt-yolo-pod.yaml without the macvlan
+# floating IP (no LAN on the 5G path). The sender reaches it through the
+# drift-yolo-target DNAT. Migratable EMT YOLO receiver: the workload DRIFT moves.
+# Receives the EMT dataset as a UDP image stream (port 5005) and runs YOLOv8n
+# on the CPU. Detections go to stdout; /health on port 9000 reports FPS and the
+# time of the last processed frame (the migration freeze shows as a gap there).
+#
+# Rules from the DRIFT pod-migration path (backend/main.py):
+#  * holder + work containers; only "work" is checkpointed.
+#  * The target pod is rebuilt from the work IMAGE only (no volumes, env, args),
+#    so code and model weights live in the image and the process holds no open
+#    file. The image must be present on every candidate node (IfNotPresent; it
+#    is side-loaded, there is no registry).
+#  * Cross-cluster needs a static macvlan IP in the JSON-list form below; the
+#    sender targets that IP, which follows the pod.
+#  * No runtimeClassName.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: emt-yolo
+  namespace: default
+  annotations:
+    # Stream follow (backend _pod_dnat_follow): the vehicle's sender targets a
+    # fixed VIP, and the node at follow-host re-points its DNAT on every
+    # migration. Clusters with the shared L2 give the pod follow-edge-ip.
+    drift.io/follow: "dnat"
+    drift.io/follow-host: "10.250.0.2"
+    drift.io/follow-edge-ip: "10.220.2.244/24"
+spec:
+  restartPolicy: Never
+  containers:
+  - name: holder
+    image: docker.io/library/python:3-slim
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "infinity"]
+    resources:
+      requests: { cpu: "50m", memory: "64Mi" }
+  - name: work
+    image: localhost/drift-emt-yolo:udp
+    imagePullPolicy: IfNotPresent
+    command: ["python3", "/app/drift_receiver.py"]
+    env:
+    # 8 threads with spinning off on BOTH boards: a CRIU-migrated process keeps
+    # its thread pool, and 8 spinning threads on the Nano's 6 cores gave 2.5 FPS
+    # (8 without spin 5.6). Spin off costs nothing on the Orin (11.2 vs 10.3
+    # FPS over 5G, 2026-10-20).
+    - name: INFER_THREADS
+      value: "8"
+    - name: INFER_SPIN
+      value: "0"
+    # no per-frame JSON on stdout: nothing reads it, and its strings were ~15%
+    # of a migration's delta
+    - name: DETECTIONS_LOG
+      value: "0"
+    # per-frame buffers (the ~110 kB JPEG, its copies) get their own mapping
+    # and are unmapped when freed, instead of leaving stale JPEG bytes in
+    # half-used heap pages that every checkpoint then ships (~0.7 MB a hop)
+    - name: MALLOC_MMAP_THRESHOLD_
+      value: "65536"
+    # ONNX Runtime keeps a SQLite telemetry DB open and POSIX-locked under
+    # $HOME/.cache (onnxruntime.db): CRIU refuses the dump ("file locks are held"),
+    # and the file would not exist in the target's fresh rootfs anyway. With no
+    # usable HOME it never opens it.
+    - name: HOME
+      value: /dev/null
+    resources:
+      requests: { cpu: "4", memory: "1Gi" }

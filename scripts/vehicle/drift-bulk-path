@@ -1,0 +1,19 @@
+#!/bin/sh
+# drift-bulk-path tunnel|5g|show: which path the vehicle Jetson uses to reach the
+# edge node for bulk checkpoint streams (the vehicle always dials them).
+#   tunnel  through the WireGuard hub (drift5g), still over 5G
+#   5g      raw wwan0: the 5G core NATs it, which is fine for a connection the
+#           vehicle opens, and nothing on the way adds encapsulation or a hop
+# Persisted in /etc/drift-bulk-path; drift-5g-route keeps the route in place.
+set -eu
+EDGE_IP=${EDGE_IP:-10.220.2.170}
+case "${1:-show}" in
+  tunnel) dev=drift5g ;;
+  5g)     dev=wwan0 ;;
+  show)   echo "$(cat /etc/drift-bulk-path 2>/dev/null || echo tunnel): $(ip route get "$EDGE_IP" | head -1)"; exit 0 ;;
+  *)      echo "usage: $0 tunnel|5g|show" >&2; exit 2 ;;
+esac
+echo "$1" > /etc/drift-bulk-path
+ip route replace "$EDGE_IP/32" dev $dev initcwnd 64 initrwnd 64   # one burst, no slow start
+conntrack -D -d "$EDGE_IP" >/dev/null 2>&1 || true
+echo "$1: $(ip route get "$EDGE_IP" | head -1)"

@@ -1,0 +1,104 @@
+#!/bin/sh
+# drift-yolo-target: where the vehicle's camera stream goes.
+#
+# The sender pod on the vehicle Jetson always sends to VIP:PORT, an address no
+# host owns. This script points that address at the YOLO pod's current home:
+#   local <pod-ip>   YOLO runs on this Jetson -> DNAT to its pod IP
+#   edge  <ip>       YOLO runs on an edge     -> DNAT to its floating IP, routed
+#                    over wwan0 so the stream crosses 5G, never the LAN port
+#   show             print the current target
+#   pause            drop the stream but remember the target, then ask YOLO to
+#                    quiesce (drop its queued frames, finish the one in flight,
+#                    free per-frame memory: ~85 -> ~52 MiB) and return once it is
+#                    idle, ~0.1-0.3 s. DRIFT runs it just before a checkpoint.
+#   resume           point back at the remembered target (rollback after pause)
+#   aim <mode> <ip>  while paused: send the stream to the migration's NEW home
+#                    already, but keep remembering the old one. DRIFT runs it
+#                    at the freeze: frames sent during the freeze are lost
+#                    either way, so the restored YOLO gets frames at once
+#                    instead of after the follow call. `resume` still rolls
+#                    back to the old target; `local|edge <ip>` confirms it.
+#                    The aimed target is kept in $STATE.aim meanwhile, and
+#                    `show` reports it: it is where the frames really go.
+#   off              remove the rule and drop the stream
+# Each switch also deletes the stream's conntrack entry: UDP keeps its old DNAT
+# until the entry times out, so without this the frames would not follow.
+set -eu
+VIP=${DRIFT_YOLO_VIP:-10.255.0.10}
+PORT=${DRIFT_YOLO_PORT:-5005}
+CHAIN=DRIFT-YOLO
+STATE=/run/drift-yolo-target
+PAUSED=$STATE.paused
+AIM=$STATE.aim
+
+# PREROUTING catches a sender in a pod, OUTPUT one on the host network. The
+# vehicle's sender is on the host network: a pod's 1240-byte MTU fragments the
+# stream, and fragments through the 5G core's NAT never reassembled at the edge.
+ensure_chain() {
+  iptables -t nat -N $CHAIN 2>/dev/null || true
+  for hook in PREROUTING OUTPUT; do
+    iptables -t nat -C $hook -d $VIP/32 -p udp --dport $PORT -j $CHAIN 2>/dev/null ||
+      iptables -t nat -I $hook 1 -d $VIP/32 -p udp --dport $PORT -j $CHAIN
+  done
+  # A host sender picks its source address for the VIP's route (the LAN port)
+  # before the DNAT re-routes it to wwan0; the 5G core drops that source.
+  iptables -t nat -C POSTROUTING -o wwan0 -m conntrack --ctorigdst $VIP -j MASQUERADE 2>/dev/null ||
+    iptables -t nat -I POSTROUTING 1 -o wwan0 -m conntrack --ctorigdst $VIP -j MASQUERADE
+}
+
+# While paused or off, frames to the VIP are sent to the discard port on
+# localhost: without a DNAT they would follow the host's default route out of
+# the LAN port. Not a DROP rule: for the host-network sender a DROP in OUTPUT
+# makes sendto() fail with EPERM, which crashed it on every pause (2026-10-20).
+# Nothing listens on 127.0.0.1:9, and an unconnected UDP socket never sees the
+# ICMP error. (A pod sender's packets to 127.0.0.1 are dropped as martians.)
+hold() {
+  ensure_chain
+  iptables -t nat -F $CHAIN
+  iptables -t nat -A $CHAIN -p udp -j DNAT --to-destination 127.0.0.1:9
+}
+release() {
+  rm -f $PAUSED
+}
+
+drop_edge_route() {
+  [ -f $STATE ] || return 0
+  set -- $(cat $STATE)
+  [ "$1" = edge ] && ip route del "$2/32" dev wwan0 2>/dev/null || true
+}
+
+switch_to() {
+  ensure_chain
+  drop_edge_route
+  iptables -t nat -F $CHAIN
+  [ "$1" = edge ] && ip route replace "$2/32" dev wwan0
+  iptables -t nat -A $CHAIN -p udp -j DNAT --to-destination "$2:$PORT"
+  conntrack -D -p udp -d $VIP >/dev/null 2>&1 || true
+  release
+  rm -f $AIM
+  echo "$1 $2" > $STATE
+  echo "yolo target: $1 $2:$PORT"
+}
+
+case "${1:-show}" in
+  local|edge) [ $# -eq 2 ] || { echo "usage: $0 $1 <ip>" >&2; exit 2; }; switch_to "$1" "$2" ;;
+  pause) hold
+        conntrack -D -p udp -d $VIP >/dev/null 2>&1 || true; touch $PAUSED
+        T=$(cut -d' ' -f2 $STATE 2>/dev/null || true)
+        q=$( [ -n "$T" ] && curl -s --max-time 3 "http://$T:9000/quiesce" || true)
+        echo "yolo target: paused ($(cat $STATE 2>/dev/null || echo off)) ${q:-quiesce: no answer}" ;;
+  aim)  [ $# -eq 3 ] || { echo "usage: $0 aim local|edge <ip>" >&2; exit 2; }
+        ensure_chain
+        iptables -t nat -F $CHAIN
+        [ "$2" = edge ] && ip route replace "$3/32" dev wwan0
+        iptables -t nat -A $CHAIN -p udp -j DNAT --to-destination "$3:$PORT"
+        conntrack -D -p udp -d $VIP >/dev/null 2>&1 || true
+        echo "$2 $3" > $AIM
+        echo "yolo target: aimed at $2 $3:$PORT (remembering $(cat $STATE 2>/dev/null || echo off))" ;;
+  resume) [ -f $STATE ] || { echo "nothing to resume" >&2; exit 1; }
+        set -- $(cat $STATE); switch_to "$1" "$2" ;;
+  off)  hold; drop_edge_route
+        conntrack -D -p udp -d $VIP >/dev/null 2>&1 || true; rm -f $STATE $PAUSED $AIM; echo "yolo target: off" ;;
+  show) s=$(cat $AIM 2>/dev/null || cat $STATE 2>/dev/null || echo off); [ -f $PAUSED ] && s="paused ($s)"; echo "$s" ;;
+  *)    echo "usage: $0 local <pod-ip> | edge <ip> | pause | aim local|edge <ip> | resume | show | off" >&2; exit 2 ;;
+esac

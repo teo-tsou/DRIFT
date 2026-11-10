@@ -1,0 +1,34 @@
+---
+- name: Check if monitoring namespace exists
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ monitoring_namespace }}"
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+  register: monitoring_ns
+
+- name: Delete monitoring namespace if it exists
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ monitoring_namespace }}"
+    state: absent
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+  when: monitoring_ns.resources | length > 0
+
+- name: Wait for namespace to be fully deleted
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ monitoring_namespace }}"
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+  register: ns_check
+  until: ns_check.resources | length == 0
+  retries: 60
+  delay: 5
+  when: monitoring_ns.resources | length > 0
+
+- name: Wait for Longhorn volumes to be cleaned up
+  pause:
+    seconds: 15
+  when: monitoring_ns.resources | length > 0

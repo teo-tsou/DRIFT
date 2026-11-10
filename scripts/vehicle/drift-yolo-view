@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""drift-yolo-view: the in-car view relay on the vehicle (10.250.0.2:8090).
+
+Serves YOLO's annotated dashcam stream (MJPEG /stream), its latest frame
+(/frame) and /health, fetched FROM the vehicle wherever YOLO runs: the local
+pod, or the edge's floating IP over 5G (drift-yolo-target's state file).
+
+Unlike a plain TCP relay it keeps the viewer's stream open across a migration:
+when the target changes, or the old YOLO goes away, it reconnects UPSTREAM by
+itself (polling the state 10x/s) and keeps writing parts to the same client.
+The viewer never reconnects, so what it sees freeze is the workload's stall,
+not a browser reconnect through the backend and the tunnel (~2.4 s measured).
+"""
+import http.client
+import http.server
+import select
+import socket
+import socketserver
+import time
+
+BIND = ("10.250.0.2", 8090)
+STATE = "/run/drift-yolo-target"
+BOUNDARY = b"--frame"
+
+
+def target():
+    try:
+        parts = open(STATE).read().split()
+        return parts[1] if len(parts) > 1 else None
+    except OSError:
+        return None
+
+
+def parts(host):
+    """Yield JPEG parts from YOLO's /stream at host until it ends, fails, or YOLO
+    moves. Raw socket + select: a migration first SILENCES the old YOLO (input
+    quiesced, then frozen), and a blocking read sat on that silent connection
+    until its 4 s timeout, so the viewer froze ~2 s longer than YOLO did. Polling
+    every 50 ms lets the stream switch the moment the target file changes."""
+    s = socket.create_connection((host, 9000), timeout=1.0)
+    try:
+        s.sendall(b"GET /stream HTTP/1.0\r\nHost: " + host.encode() + b"\r\n\r\n")
+        s.setblocking(False)
+        buf, body = b"", False
+        while True:
+            r, _, _ = select.select([s], [], [], 0.05)
+            if not r:
+                if target() != host:
+                    return                     # YOLO moved: switch upstream now
+                continue
+            chunk = s.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+            if not body:                       # skip the HTTP response head once
+                i = buf.find(b"\r\n\r\n")
+                if i < 0:
+                    continue
+                buf, body = buf[i + 4:], True
+            while True:
+                i = buf.find(b"\r\n\r\n")
+                if i < 0:
+                    break
+                head = buf[:i].decode("latin1")
+                n = next((int(l.split(":")[1]) for l in head.split("\r\n") if l.lower().startswith("content-length")), None)
+                if n is None:                  # not a part header: resync
+                    buf = buf[i + 4:]
+                    continue
+                if len(buf) < i + 4 + n:
+                    break
+                yield buf[i + 4:i + 4 + n]
+                buf = buf[i + 4 + n:].lstrip(b"\r\n")
+    finally:
+        s.close()
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *a):
+        pass
+
+    def proxy(self, path):
+        t = target()
+        try:
+            c = http.client.HTTPConnection(t, 9000, timeout=4)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            self.send_response(r.status)
+            self.send_header("Content-Type", r.getheader("Content-Type", "application/octet-stream"))
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            self.send_error(502)
+
+    def do_GET(self):
+        if not self.path.startswith("/stream"):
+            return self.proxy(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        while True:
+            t = target()
+            if not t:
+                time.sleep(0.1)
+                continue
+            try:
+                for jpg in parts(t):
+                    self.wfile.write(BOUNDARY + b"\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                     + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+                    if target() != t:          # YOLO moved: switch upstream now
+                        break
+            except (BrokenPipeError, ConnectionResetError):
+                return                         # the viewer left
+            except Exception:
+                time.sleep(0.05)               # upstream gone (frozen, fenced): retry
+
+
+class Srv(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+if __name__ == "__main__":
+    Srv(BIND, H).serve_forever()

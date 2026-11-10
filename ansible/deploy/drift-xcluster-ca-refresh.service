@@ -1,0 +1,16 @@
+[Unit]
+Description=DRIFT cross-cluster KubeVirt CA refresh (keeps peer trust fresh)
+Documentation=DRIFT xcluster_migration ansible role
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Re-run only the CA-exchange tasks of the pair-prep playbook. KubeVirt rotates
+# its internal CA roughly hourly; this re-injects each cluster's current
+# kubevirt-ca into the peer's kubevirt-external-ca so virt-operator re-merges it
+# into kubevirt-ca before the previously-merged copy goes stale. Fast (~8s),
+# idempotent. Ansible runs inside the backend container, which holds the SSH key
+# and the pair inventory.
+ExecStart=/usr/bin/docker exec drift-backend sh -c \
+  'cd /app/ansible && ansible-playbook -i inventories/xcluster/hosts.yml playbooks/prepare_xcluster_migration.yml --tags ca'

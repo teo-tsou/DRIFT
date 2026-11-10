@@ -1,0 +1,216 @@
+---
+# Provision an edge node for controller-driven CRIU pod live-migration:
+#   1. build a dynamic crun (+CRIU) as crun-drift,
+#   2. mount the shared checkpoint store (NFS),
+#   3. install the drift-pod-migrate controller CLI.
+# Idempotent: each step is guarded so re-runs are no-ops.
+
+# ── 1. dynamic crun (+CRIU) → crun-drift ─────────────────────────────────────
+- name: Check for an existing crun-drift of the desired version
+  command: "{{ crun_drift_path }} --version"
+  register: crun_drift_have
+  changed_when: false
+  failed_when: false
+
+- name: Build + install crun-drift (dynamic, +CRIU)
+  when: crun_version not in (crun_drift_have.stdout | default(''))
+  block:
+    - name: Install crun build dependencies
+      apt:
+        name: "{{ crun_build_deps }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install libcriu-dev (PPA path); tolerated if criu was source-built
+      # Source-built criu (criu role's fallback) already provides the headers +
+      # criu.pc under /usr/local, so a missing apt package here is expected — do
+      # not let it abort the build. crun's configure finds criu via pkg-config.
+      apt:
+        name: libcriu-dev
+        state: present
+      failed_when: false
+
+    - name: Clone crun source
+      git:
+        repo: "{{ crun_git_url }}"
+        dest: "{{ crun_build_dir }}"
+        version: "{{ crun_version }}"
+        force: true
+
+    - name: Build crun (dynamic, +CRIU)
+      # focal has json-c 0.13 (< 0.14), so crun is built against yajl instead.
+      shell: |
+        set -o pipefail
+        cd {{ crun_build_dir }}
+        git clean -fdx
+        ./autogen.sh
+        ./configure
+        make -j"$(nproc)"
+      args:
+        executable: /bin/bash
+        creates: "{{ crun_build_dir }}/crun"
+
+    - name: Install crun-drift
+      copy:
+        src: "{{ crun_build_dir }}/crun"
+        dest: "{{ crun_drift_path }}"
+        mode: "0755"
+        remote_src: true
+
+    - name: Verify crun-drift is dynamic and CRIU-capable
+      shell: |
+        set -o pipefail
+        {{ crun_drift_path }} --version | grep -q '+CRIU' \
+          && file {{ crun_drift_path }} | grep -q 'dynamically linked'
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+# ── 2. shared checkpoint store (NFS) ─────────────────────────────────────────
+- name: Ensure the checkpoint store mount point exists
+  file:
+    path: "{{ ckpt_store_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Set up the NFS-backed shared checkpoint store
+  when: ckpt_store_manage_nfs | bool
+  block:
+    - name: Install the NFS client
+      apt:
+        name: nfs-common
+        state: present
+
+    - name: Mount the shared checkpoint store
+      # The same path on every node is what lets the target node read the
+      # images the source node wrote, with no per-migration copy on the
+      # frozen path. Skipped gracefully if no NFS server is configured yet.
+      ansible.posix.mount:
+        path: "{{ ckpt_store_path }}"
+        src: "{{ ckpt_nfs_server }}:{{ ckpt_nfs_export }}"
+        fstype: nfs
+        opts: "{{ ckpt_nfs_mount_opts }}"
+        state: mounted
+      when: ckpt_nfs_server | length > 0
+
+# ── 3. migration controller CLI ──────────────────────────────────────────────
+- name: Install tooling the controller needs (arping for L2 GARP, nsenter via util-linux)
+  # --l2-ip failover sends an unsolicited ARP from the target so the switch and
+  # peers relearn the floating IP on the new node; nsenter enters the pod netns
+  # to move the IP. util-linux (nsenter) is present on the base image.
+  apt:
+    name:
+      - iputils-arping
+    state: present
+
+- name: Allow large UDP receive buffers (EMT image-stream workload)
+  # The EMT receiver asks for a 4 MB socket buffer, as each frame arrives as a
+  # burst of ~670 datagrams. The default net.core.rmem_max (208 KB) caps it and
+  # most frames arrive incomplete (seen on the AGX Orin). The limit is
+  # host-wide, not per pod, so it is set on every migration node.
+  sysctl:
+    name: net.core.rmem_max
+    value: "{{ drift_udp_rmem_max | default(8388608) }}"
+    sysctl_file: /etc/sysctl.d/90-drift-udp.conf
+    reload: true
+
+- name: Install the drift-pod-migrate controller
+  copy:
+    src: drift-pod-migrate.sh
+    dest: "{{ migrate_bin_path }}"
+    mode: "0755"
+
+- name: Install the cgroup-image normalizer (cross-host cpuset strip)
+  copy:
+    src: drift-cgroup-strip.py
+    dest: "{{ cgroup_strip_path }}"
+    mode: "0755"
+
+# ── 4. drift-node-agent DaemonSet (the migration transport — replaces SSH) ────
+- name: Check for a local kubeconfig (marks a control-plane node)
+  stat:
+    path: "{{ node_agent_kubeconfig }}"
+  register: _na_kubeconfig
+
+- name: Deploy the drift-node-agent on control-plane nodes
+  when: _na_kubeconfig.stat.exists
+  block:
+    - name: Stage the node-agent script + manifest
+      copy:
+        src: "{{ item }}"
+        dest: "/tmp/{{ item }}"
+      loop:
+        - drift-node-agent.py
+        - drift-node-agent.yaml
+
+    - name: Create the node-agent token secret + script configmap + DaemonSet
+      # Shared token if the orchestrator passed one (cross-cluster: both edges
+      # must match); otherwise generate a random token once and keep it.
+      shell: |
+        export KUBECONFIG={{ node_agent_kubeconfig }}
+        TOKEN="{{ node_agent_token }}"
+        if [ -n "$TOKEN" ]; then
+          kubectl -n kube-system create secret generic drift-node-agent \
+            --from-literal=token="$TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+        else
+          kubectl -n kube-system get secret drift-node-agent >/dev/null 2>&1 || \
+            kubectl -n kube-system create secret generic drift-node-agent \
+              --from-literal=token="$(openssl rand -hex 24)"
+        fi
+        kubectl -n kube-system create configmap drift-node-agent-script \
+          --from-file=/tmp/drift-node-agent.py --dry-run=client -o yaml | kubectl apply -f -
+        kubectl apply -f /tmp/drift-node-agent.yaml
+      changed_when: false
+
+    - name: Ensure the macvlan + static CNI plugins are present (for the L2 NAD)
+      # kube-ovn ships its own CNI set but not the generic macvlan/static plugins
+      # the cross-cluster floating-IP attachment needs. Passed as cmd: (not the
+      # free-form string) because Ansible's argument splitter rejected the
+      # case-statement + line-continuation form ("unbalanced jinja2 block").
+      shell:
+        cmd: |
+          set -o pipefail
+          mkdir -p /opt/cni/bin
+          # All three, not just macvlan: on the Orin static went missing while
+          # macvlan stayed, and a macvlan-only check never put it back.
+          [ -x /opt/cni/bin/macvlan ] && [ -x /opt/cni/bin/static ] && [ -x /opt/cni/bin/host-local ] && exit 0
+          cd /tmp
+          # CNI tarballs are per-arch under Go's names, derived on the node
+          # because the playbooks applying this role do not all gather facts.
+          arch=$(dpkg --print-architecture 2>/dev/null || true)
+          if [ -z "$arch" ]; then
+            case "$(uname -m)" in
+              x86_64) arch=amd64 ;;
+              aarch64) arch=arm64 ;;
+              armv7l) arch=arm ;;
+            esac
+          fi
+          url="https://github.com/containernetworking/plugins/releases/download/{{ pm_cni_plugins_version }}/cni-plugins-linux-${arch}-{{ pm_cni_plugins_version }}.tgz"
+          curl -fsSL -o cni-plugins.tgz "$url"
+          tar -xzf cni-plugins.tgz -C /opt/cni/bin ./macvlan ./static ./host-local
+          rm -f cni-plugins.tgz
+        executable: /bin/bash
+
+    - name: Create the macvlan-l2 NetworkAttachmentDefinition (cross-cluster floating IP)
+      shell: |
+        export KUBECONFIG={{ node_agent_kubeconfig }}
+        kubectl apply -f - <<'EOF'
+        apiVersion: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        metadata:
+          name: {{ macvlan_nad_name }}
+        spec:
+          config: '{"cniVersion":"0.3.1","type":"macvlan","master":"{{ macvlan_nad_master }}","mode":"bridge","ipam":{"type":"static","routes":{{ macvlan_nad_routes | to_json }}}}'
+        EOF
+      changed_when: false
+      when: macvlan_nad_master | length > 0
+
+- name: Report pod-migration readiness
+  debug:
+    msg: >-
+      {{ inventory_hostname }}: crun-drift {{ crun_version }} (dynamic +CRIU) |
+      store {{ ckpt_store_path }}
+      {{ '(nfs ' + ckpt_nfs_server + ')' if (ckpt_store_manage_nfs | bool and ckpt_nfs_server | length > 0) else '(local)' }} |
+      controller {{ migrate_bin_path }}
+      {{ '| node-agent deployed' if _na_kubeconfig.stat.exists else '' }}

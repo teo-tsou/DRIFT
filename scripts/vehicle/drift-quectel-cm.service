@@ -1,0 +1,10 @@
+[Unit]
+Description=DRIFT 5G modem data call (quectel-CM, QMI)
+After=network-online.target
+[Service]
+WorkingDirectory=/home/ecb/OAI-URLLC-5G/quectel-ue
+ExecStart=/home/ecb/OAI-URLLC-5G/quectel-ue/quectel-CM
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

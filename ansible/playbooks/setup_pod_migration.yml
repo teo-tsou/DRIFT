@@ -1,0 +1,19 @@
+---
+# Provision the edge nodes for controller-driven CRIU pod live-migration:
+# builds a dynamic crun (+CRIU) as crun-drift, mounts the shared checkpoint
+# store, and installs the drift-pod-migrate controller.
+#
+#   ansible-playbook -i inventories/xcluster/hosts.yml \
+#       -e ckpt_nfs_server=<hub-ip> playbooks/setup_pod_migration.yml
+#
+# Prerequisites (apply first): setup_criu.yml, setup_crio.yml. Requires a
+# kernel >= 5.15 on every node (older kernels lack the checkpoint features and
+# hit the time-namespace / rseq issues documented in roles/pod_migration).
+- name: Controller-driven CRIU pod live-migration on the edge nodes
+  hosts: xcluster_pair
+  become: true
+  gather_facts: true
+  vars:
+    ansible_ssh_pipelining: true
+  roles:
+    - pod_migration

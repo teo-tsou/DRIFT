@@ -1,0 +1,120 @@
+---
+- name: Set KubeVirt version
+  set_fact:
+    kubevirt_version: "v1.7.2"
+
+- name: Create kubevirt namespace (poll until webhook ready)
+  shell: |
+    kubectl create namespace kubevirt --dry-run=client -o yaml | kubectl apply -f -
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+  register: kubevirt_ns_result
+  until: kubevirt_ns_result.rc == 0
+  retries: 10
+  delay: 15
+
+# Apply KubeVirt and CDI manifests back-to-back without waiting in between.
+# CDI has no dependency on KubeVirt being ready — both operators start in
+# parallel in the cluster. Total wait = max(kubevirt_ready, cdi_ready)
+# instead of kubevirt_ready + cdi_ready (~2-3 min saved).
+
+- name: Apply KubeVirt operator
+  shell: |
+    kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-operator.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Apply KubeVirt CR
+  shell: |
+    kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-cr.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Apply CDI operator
+  shell: |
+    kubectl apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/v1.64.0/cdi-operator.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+
+- name: Wait for the CDI CRD to register before applying the CR
+  # The operator's CRD (cdis.cdi.kubevirt.io) must exist before `kubectl apply`
+  # of the CDI CR is recognised; applying back-to-back can race the registration,
+  # leaving the operator running but no CDI CR — so DataVolumes/the cdi apiserver
+  # never deploy and cross-cluster VM migration's receiver DV 404s on the target.
+  shell: kubectl get crd cdis.cdi.kubevirt.io
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  register: cdi_crd
+  until: cdi_crd.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Apply CDI CR (retry until the CRD accepts it)
+  shell: |
+    kubectl apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/v1.64.0/cdi-cr.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  register: cdi_cr_apply
+  until: cdi_cr_apply.rc == 0
+  retries: 10
+  delay: 5
+
+- name: Wait for KubeVirt to be ready
+  shell: |
+    kubectl wait kubevirt/kubevirt -n kubevirt --for=condition=Available --timeout=600s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+
+- name: Wait for CDI to be ready
+  shell: |
+    kubectl wait cdi/cdi -n cdi --for=condition=Available --timeout=600s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+
+- name: Set longhorn-rwx StorageProfile to csi-clone (instant clones, no lost+found, RWX live migration)
+  shell: |
+    kubectl patch storageprofile longhorn-rwx --type=merge -p '{"spec":{"cloneStrategy":"csi-clone"}}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false
+  ignore_errors: true
+
+- name: Configure CDI importer resource limits (prevent OOMKill during qemu-img conversion)
+  shell: |
+    kubectl patch cdi cdi -n cdi --type=merge -p '{
+      "spec": {
+        "config": {
+          "podResourceRequirements": {
+            "requests": {"memory": "256Mi", "cpu": "100m"},
+            "limits":   {"memory": "1Gi",  "cpu": "1"}
+          }
+        }
+      }
+    }'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  run_once: true
+  delegate_to: "{{ groups['management_nodes'][0] }}"
+  changed_when: false

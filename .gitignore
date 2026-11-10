@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+venv_py38_backup/
+ENV/
+env/
+
+# Generated kubeconfigs (contain cluster credentials)
+backend/kubeconfigs/
+
+# Secrets / generated env files
+central_hub/deploy/.env
+*.env
+!*.env.example
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Rancher etcd snapshots (can be hundreds of MB — not for version control)
+central_hub/deploy/rancher-snapshots/*
+!central_hub/deploy/rancher-snapshots/.gitkeep
+
+# Cluster-specific info files (contain internal IPs and cluster IDs)
+cluster_api/*_cluster_info.json
+.claude/
+
+# Not part of the public code: reports, paper, dataset, proposal, internal notes
+deliverable/
+paper/
+dataport/
+Proposal_*.pdf
+docs/kpi-runs/
+docs/pqos-tut/
+docs/PROJECT_STATUS.md
+docs/DRIFT_progress-report_*.pdf
+docs/demo-runbook.md
+docs/demo-commands.md
+docs/jetson-recovery.md
+HANDOFF.md
+demo/*.pptx
+.vscode/
+main.yml

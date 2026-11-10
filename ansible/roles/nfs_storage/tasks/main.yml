@@ -1,0 +1,142 @@
+---
+- name: Validate vars
+  assert:
+    that:
+      - nfs_storage_server | length > 0
+    fail_msg: nfs_storage needs nfs_storage_server (the host exporting the share).
+
+# ── NFS export (only on the serving host) ────────────────────────────────────
+- name: Ensure NFS server + export directory
+  when: ansible_host == nfs_storage_server
+  block:
+    - name: Install nfs-kernel-server
+      package:
+        name: nfs-kernel-server
+        state: present
+
+    - name: Create export directory
+      file:
+        path: "{{ nfs_storage_path }}"
+        state: directory
+        mode: "0777"
+
+    - name: Export the share
+      lineinfile:
+        path: /etc/exports
+        # async: the store holds transient checkpoint images — a lost write just
+        # fails one migration attempt (which rolls back). sync capped dumps at
+        # ~4 MiB/s and made big-RSS (AI/ML) workloads unmigratable in practice.
+        line: "{{ nfs_storage_path }} {{ nfs_storage_export_net }}(rw,async,no_subtree_check,no_root_squash)"
+        create: true
+      register: exports_line
+
+    - name: Re-export
+      command: exportfs -ra
+      when: exports_line is changed
+
+# ── provisioner + StorageClass (every cluster server node) ───────────────────
+# NOTE the RBAC: the provisioner's leader election needs endpoints AND
+# coordination.k8s.io/leases. Without them it starts "Ready" but silently never
+# provisions — every PVC on the class sits Pending forever.
+- name: Deploy nfs-subdir-external-provisioner + RWX StorageClass
+  shell: |
+    set -e
+    kubectl apply -f - <<'EOF'
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata: {name: nfs-provisioner, namespace: kube-system}
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata: {name: nfs-provisioner}
+    rules:
+    - apiGroups: [""]
+      resources: [persistentvolumes]
+      verbs: [get, list, watch, create, delete]
+    - apiGroups: [""]
+      resources: [persistentvolumeclaims]
+      verbs: [get, list, watch, update]
+    - apiGroups: [storage.k8s.io]
+      resources: [storageclasses]
+      verbs: [get, list, watch]
+    - apiGroups: [""]
+      resources: [events]
+      verbs: [create, update, patch]
+    - apiGroups: [""]
+      resources: [endpoints]
+      verbs: [get, list, watch, create, update, patch]
+    - apiGroups: [coordination.k8s.io]
+      resources: [leases]
+      verbs: [get, list, watch, create, update, patch]
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata: {name: nfs-provisioner}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: nfs-provisioner}
+    subjects:
+    - {kind: ServiceAccount, name: nfs-provisioner, namespace: kube-system}
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata: {name: nfs-provisioner, namespace: kube-system}
+    spec:
+      replicas: 1
+      selector: {matchLabels: {app: nfs-provisioner}}
+      template:
+        metadata: {labels: {app: nfs-provisioner}}
+        spec:
+          serviceAccountName: nfs-provisioner
+          containers:
+          - name: provisioner
+            image: {{ nfs_provisioner_image }}
+            env:
+            - {name: PROVISIONER_NAME, value: drift.io/nfs}
+            - {name: NFS_SERVER, value: "{{ nfs_storage_server }}"}
+            - {name: NFS_PATH, value: "{{ nfs_storage_path }}"}
+            volumeMounts:
+            - {name: nfs, mountPath: /persistentvolumes}
+          volumes:
+          - name: nfs
+            nfs: {server: "{{ nfs_storage_server }}", path: "{{ nfs_storage_path }}"}
+    ---
+    apiVersion: storage.k8s.io/v1
+    kind: StorageClass
+    metadata: {name: "{{ nfs_storage_class }}"}
+    provisioner: drift.io/nfs
+    reclaimPolicy: Delete
+    volumeBindingMode: Immediate
+    parameters: {archiveOnDelete: "false"}
+    EOF
+  environment:
+    KUBECONFIG: "{{ nfs_storage_kubeconfig }}"
+
+- name: Wait for the provisioner to be Ready
+  shell: kubectl -n kube-system rollout status deploy/nfs-provisioner --timeout=180s
+  environment:
+    KUBECONFIG: "{{ nfs_storage_kubeconfig }}"
+  changed_when: false
+
+# Provisioning smoke test — catches the silent-RBAC class of failure: a PVC on
+# the class must BIND, not just the deployment turning Ready.
+- name: Smoke-test the class (PVC must bind)
+  shell: |
+    set -e
+    kubectl apply -f - <<'EOF'
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata: {name: nfs-storage-smoke, namespace: default}
+    spec:
+      accessModes: [ReadWriteMany]
+      storageClassName: "{{ nfs_storage_class }}"
+      resources: {requests: {storage: 10Mi}}
+    EOF
+    for i in $(seq 1 24); do
+      [ "$(kubectl get pvc nfs-storage-smoke -n default -o jsonpath='{.status.phase}')" = Bound ] && break
+      sleep 5
+    done
+    PHASE=$(kubectl get pvc nfs-storage-smoke -n default -o jsonpath='{.status.phase}')
+    kubectl delete pvc nfs-storage-smoke -n default --wait=false
+    [ "$PHASE" = Bound ] || { echo "PVC never bound (provisioner broken?)"; exit 1; }
+  environment:
+    KUBECONFIG: "{{ nfs_storage_kubeconfig }}"
+  changed_when: false

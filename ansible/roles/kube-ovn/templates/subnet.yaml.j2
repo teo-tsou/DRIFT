@@ -1,0 +1,22 @@
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: {{ network.name | lower | replace('_', '-') | replace(' ', '-') }}
+spec:
+  protocol: IPv4
+  cidrBlock: {{ network.cidr }}
+  # Gateway: use explicit value if provided, otherwise default to .1 of the subnet
+  gateway: {{ network.gateway | default(network.cidr | regex_replace('/.*', '') | regex_replace('(\d+)$', '1')) }}
+  # Distributed: each node is its own gateway — best for live migration
+  gatewayType: distributed
+  # SNAT outbound traffic so VMs can reach external networks
+  natOutgoing: true
+  # Namespaces allowed to use this subnet
+  namespaces:
+    - default
+    {% for ns in (network.namespaces or []) %}
+    - {{ ns }}
+    {% endfor %}
+  # Reserve the gateway IP and broadcast
+  excludeIps:
+    - {{ network.gateway | default(network.cidr | regex_replace('/.*', '') | regex_replace('(\d+)$', '1')) }}

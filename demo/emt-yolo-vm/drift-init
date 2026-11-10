@@ -1,0 +1,32 @@
+#!/bin/sh
+# PID 1 of the EMT YOLO VM: no systemd, no udev, no distro services. Mount the
+# kernel filesystems, bring up the one NIC, start the receiver (and restart it
+# if it ever exits). Boot to inference is the kernel plus this script.
+export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+mount -o remount,rw /
+hostname emt-yolo-vm
+# Large UDP receive buffers, or frames (~80 datagrams each) arrive incomplete.
+echo 8388608 > /proc/sys/net/core/rmem_max
+echo 8388608 > /proc/sys/net/core/rmem_default
+ip link set lo up
+# KubeVirt masquerade binding: the guest side is always 10.0.2.2/24 via 10.0.2.1.
+IF=$(ls /sys/class/net | grep -v '^lo$' | head -1)
+ip link set "$IF" up
+ip addr add 10.0.2.2/24 dev "$IF"
+ip route add default via 10.0.2.1
+echo "drift-init: $IF up, starting the YOLO receiver" > /dev/console
+set -a; . /etc/drift.env; set +a
+cd /app
+while true; do
+    python3 /app/drift_receiver.py > /dev/console 2>&1
+    echo "drift-init: receiver exited ($?), restarting" > /dev/console
+    sleep 1
+done

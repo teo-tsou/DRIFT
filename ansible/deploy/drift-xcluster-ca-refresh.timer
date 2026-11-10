@@ -1,0 +1,16 @@
+[Unit]
+Description=Periodic DRIFT cross-cluster KubeVirt CA refresh
+Documentation=DRIFT xcluster_migration ansible role
+
+[Timer]
+# KubeVirt's CA rotates ~hourly; refresh every 15 min for comfortable margin so
+# peer trust is ALWAYS fresh at migration time (never refreshed reactively
+# mid-migration, where the sync controller's cached TLS transport would not pick
+# up the new CA anyway).
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

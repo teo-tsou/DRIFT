@@ -1,0 +1,58 @@
+---
+# Longhorn host prerequisites
+- name: Ensure open-iscsi and nfs-common are present
+  package:
+    name:
+      - open-iscsi
+      - nfs-common
+    state: present
+  become: true
+
+- name: Ensure iscsid service is enabled and running (best-effort)
+  service:
+    name: iscsid
+    enabled: yes
+    state: started
+  become: true
+  ignore_errors: true  # service name may vary slightly across distros
+
+# multipathd (active by default on Ubuntu) claims Longhorn's iSCSI block
+# devices (vendor IET, product VIRTUAL-DISK) and creates dm-multipath entries
+# on top of them.  mke2fs then refuses to format the device ("apparently in
+# use"), crashing the Longhorn share manager on every RWX volume mount.
+# Blacklisting the IET vendor/product fixes this permanently.
+- name: Configure multipath to blacklist Longhorn iSCSI devices
+  copy:
+    dest: /etc/multipath.conf
+    content: |
+      defaults {
+          user_friendly_names yes
+          find_multipaths no
+      }
+
+      blacklist {
+          device {
+              vendor "IET"
+              product "VIRTUAL-DISK"
+          }
+      }
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  register: multipath_conf
+
+- name: Reload multipathd to apply blacklist (best-effort)
+  shell: multipathd reconfigure 2>&1 || true
+  become: true
+  when: multipath_conf.changed
+  changed_when: false
+
+- name: Flush any existing Longhorn multipath devices (best-effort)
+  shell: |
+    for dev in $(multipath -l 2>/dev/null | grep 'IET' | awk '{print $1}'); do
+      multipath -f "$dev" 2>/dev/null || true
+    done
+  become: true
+  when: multipath_conf.changed
+  changed_when: false

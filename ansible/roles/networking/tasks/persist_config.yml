@@ -1,0 +1,28 @@
+---
+- name: Create netplan configuration for persistent networking
+  template:
+    src: netplan-bridge.yaml.j2
+    dest: /etc/netplan/99-bridge-config.yaml
+    backup: yes
+  notify: apply netplan
+  when: ansible_os_family == "Debian"
+
+- name: Create systemd service for bridge setup (alternative to netplan)
+  template:
+    src: bridge-setup.service.j2
+    dest: /etc/systemd/system/bridge-setup.service
+  when: ansible_os_family == "Debian"
+  register: bridge_service
+
+- name: Enable bridge setup service
+  systemd:
+    name: bridge-setup
+    enabled: yes
+    daemon_reload: yes
+  when: bridge_service is changed
+
+- name: Create bridge setup script
+  template:
+    src: setup-bridge.sh.j2
+    dest: /usr/local/bin/setup-bridge.sh
+    mode: '0755'

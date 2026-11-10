@@ -1,0 +1,11 @@
+---
+- name: Install KubeOVN as primary CNI
+  include_tasks: install.yml
+
+- name: Create OVN Subnet CRDs
+  include_tasks: create_subnets.yml
+  when: ovn_networks | length > 0
+
+- name: Create Multus NADs for OVN networks
+  include_tasks: create_nads.yml
+  when: ovn_networks | length > 0

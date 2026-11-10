@@ -1,0 +1,35 @@
+# FastAPI Backend Dependencies
+
+# Web Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0  # PostgreSQL driver
+asyncpg>=0.29.0  # Async PostgreSQL driver
+alembic>=1.13.0  # Database migrations
+
+# Authentication & Security
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+
+# Utilities
+httpx>=0.26.0  # Async HTTP client
+aiofiles>=23.2.0
+python-dotenv>=1.0.0
+
+# Existing project dependencies
+requests>=2.31.0
+urllib3>=2.0.0
+pyyaml>=6.0.1
+
+# Kubernetes client (from existing setup)
+kubernetes>=28.1.0
+
+# Celery for async task processing (optional for MVP)
+# celery>=5.3.0
+# redis>=5.0.0

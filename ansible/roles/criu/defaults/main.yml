@@ -1,0 +1,32 @@
+---
+# CRIU (Checkpoint/Restore In Userspace) — the basis for same-architecture
+# container/pod live-migration at the edge (checkpoint a running container,
+# ship it, restore it elsewhere). Ubuntu 20.04 (focal) AND 24.04 (noble) ship no
+# criu in the archive, so it is installed from the upstream criu PPA — which does
+# publish noble builds (validated: criu 4.2.1 on kernel 6.8). If a given release
+# has no PPA build, the role falls back to building criu from source.
+criu_ppa: "ppa:criu/ppa"
+criu_package: criu
+
+# ── source-build fallback (used only if the PPA has no build for this release) ─
+# `make install` lays down the criu binary, libcriu.so.2 (runtime) AND the dev
+# headers + criu.pc under /usr/local — so it also satisfies the libcriu-dev that
+# the crun-drift build (pod_migration role) needs, via pkg-config.
+criu_git_url: "https://github.com/checkpoint-restore/criu.git"
+criu_source_version: "v3.19"     # a release known to build on 6.x kernels
+criu_build_dir: /root/criu-build
+criu_build_deps:
+  - build-essential
+  - libprotobuf-dev
+  - libprotobuf-c-dev
+  - protobuf-c-compiler
+  - protobuf-compiler
+  - python3-protobuf
+  - libnl-3-dev
+  - libnet-dev
+  - libcap-dev
+  - libbsd-dev
+  - libnftables-dev
+  - pkg-config
+  - uuid-dev
+  - git

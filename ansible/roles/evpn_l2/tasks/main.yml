@@ -1,0 +1,125 @@
+---
+- name: Resolve the peer list (peer_hosts for a mesh, else [peer_host])
+  set_fact:
+    evpn_peer_list: "{{ peer_hosts | default([peer_host] if (peer_host is defined) else []) }}"
+
+- name: Validate peering vars
+  assert:
+    that:
+      - evpn_peer_list | length > 0
+      - evpn_peer_list | map('extract', hostvars) | map(attribute='ansible_host') | list | length == (evpn_peer_list | length)
+    fail_msg: "evpn_l2 needs peer_hosts (or peer_host) set on every host, each resolvable in hostvars with ansible_host."
+
+- name: Install FRR
+  apt:
+    name: [frr, frr-pythontools]
+    state: present
+    update_cache: true
+
+- name: Enable bgpd in FRR daemons
+  lineinfile:
+    path: /etc/frr/daemons
+    regexp: '^bgpd='
+    line: 'bgpd=yes'
+  notify: restart frr
+
+# ── stretched-L2 dataplane: bridge + vxlan (systemd, survives reboot) ─────────
+- name: Install EVPN link setup script
+  template:
+    src: drift-evpn-link.sh.j2
+    dest: /usr/local/sbin/drift-evpn-link.sh
+    mode: "0755"
+  notify: reassert evpn link
+
+- name: Install EVPN link systemd unit
+  template:
+    src: drift-evpn-link.service.j2
+    dest: /etc/systemd/system/drift-evpn-link.service
+    mode: "0644"
+  notify: reload systemd
+
+- name: Flush handlers so the unit + script are in place
+  meta: flush_handlers
+
+- name: Enable + start EVPN link (bridge + vxlan)
+  systemd:
+    name: drift-evpn-link.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# ── EVPN control plane: FRR ───────────────────────────────────────────────────
+- name: Deploy FRR config
+  template:
+    src: frr.conf.j2
+    dest: /etc/frr/frr.conf
+    owner: frr
+    group: frr
+    mode: "0640"
+  notify: restart frr
+
+- name: Ensure FRR enabled + started
+  systemd:
+    name: frr
+    enabled: true
+    state: started
+
+- name: Apply any pending FRR restart
+  meta: flush_handlers
+
+- name: Wait for the EVPN BGP session to reach Established
+  shell: >-
+    vtysh -c 'show bgp l2vpn evpn summary json' 2>/dev/null |
+    python3 -c "import json,sys;d=json.load(sys.stdin);p=d.get('peers',{});print('up' if any(v.get('state')=='Established' for v in p.values()) else 'down')"
+  register: evpn_state
+  until: evpn_state.stdout.strip() == 'up'
+  retries: 15
+  delay: 4
+  changed_when: false
+
+- name: Report EVPN VNI state
+  shell: vtysh -c 'show evpn vni' 2>/dev/null | sed -n '1,6p'
+  register: evpn_vni_state
+  changed_when: false
+
+# ── attachment layer: CNI bridge plugin + the VM NAD ─────────────────────────
+- name: Install the bridge/host-local/static CNI plugins
+  shell: |
+    set -e
+    mkdir -p /opt/cni/bin
+    cd /tmp
+    # Per-arch tarball, derived on the node: this play runs with gather_facts:
+    # false, so ansible_architecture is not available here.
+    arch=$(dpkg --print-architecture 2>/dev/null) || \
+      arch=$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; armv7l) echo arm;; esac)
+    curl -fsSL -o cni-plugins.tgz \
+      https://github.com/containernetworking/plugins/releases/download/{{ evpn_cni_plugins_version }}/cni-plugins-linux-${arch}-{{ evpn_cni_plugins_version }}.tgz
+    tar -xzf cni-plugins.tgz -C /opt/cni/bin ./bridge ./host-local ./static
+    rm -f cni-plugins.tgz
+  args:
+    creates: /opt/cni/bin/bridge
+
+- name: Ensure /etc/drift exists
+  file:
+    path: /etc/drift
+    state: directory
+    mode: "0755"
+
+- name: Render the stretched-L2 NAD
+  template:
+    src: drift-evpn-nad.yaml.j2
+    dest: /etc/drift/drift-evpn-nad.yaml
+    mode: "0644"
+
+- name: Apply the stretched-L2 NAD to this cluster
+  shell: kubectl apply -f /etc/drift/drift-evpn-nad.yaml
+  environment:
+    KUBECONFIG: "{{ evpn_kubeconfig }}"
+  register: nad_apply
+  changed_when: "'unchanged' not in nad_apply.stdout"
+
+- name: Show EVPN VNI + NAD
+  debug:
+    msg: >-
+      {{ inventory_hostname }}: BGP {{ evpn_state.stdout.strip() }} |
+      {{ evpn_vni_state.stdout_lines }} | NAD: {{ nad_apply.stdout }}

@@ -1,0 +1,109 @@
+---
+# Install K3s server (control plane) directly — no Rancher required.
+# After this playbook, the orchestrator reads the node-token via SSH
+# and passes it to join_k3s_workers.yml for worker node registration.
+
+- name: Bootstrap Python on server nodes
+  hosts: management_nodes
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Skip non-server nodes
+      meta: end_host
+      when: "'server' not in node_roles"
+
+    - name: Ensure Python 3.7+ is available
+      raw: |
+        python3 -c "import sys; exit(0 if sys.version_info >= (3,7) else 1)" 2>/dev/null \
+          || (DEBIAN_FRONTEND=noninteractive apt-get install -y python3 >/dev/null 2>&1)
+      changed_when: false
+      failed_when: false
+
+- name: Install K3s Server
+  hosts: management_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  vars:
+    k3s_version: "{{ kubernetes_version | default('v1.34.5+k3s1') }}"
+    pod_cidr: "{{ pod_cidr | default('10.42.0.0/16') }}"
+    service_cidr: "{{ service_cidr | default('10.43.0.0/16') }}"
+    ansible_ssh_pipelining: true
+    ansible_command_timeout: 60
+    ansible_become_timeout: 30
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10'
+
+  tasks:
+    - name: Skip non-server nodes
+      meta: end_host
+      when: "'server' not in node_roles"
+
+    - name: Check if K3s server is already running
+      shell: systemctl is-active k3s 2>/dev/null || echo inactive
+      register: k3s_status
+      changed_when: false
+      failed_when: false
+      timeout: 10
+
+    - name: Clean previous K3s install if present
+      shell: |
+        if [ -f /usr/local/bin/k3s-uninstall.sh ]; then
+          /usr/local/bin/k3s-uninstall.sh 2>/dev/null || true
+        fi
+        rm -rf /etc/rancher/k3s /var/lib/rancher/k3s /run/k3s /run/flannel
+        rm -rf /etc/cni /opt/cni
+        systemctl daemon-reload 2>/dev/null || true
+      when: k3s_status.stdout != 'inactive'
+      changed_when: false
+      failed_when: false
+      timeout: 120
+
+    # When container_runtime=crio, install CRIU + CRI-O (configured for
+    # checkpoint/restore) BEFORE K3s, so the kubelet uses CRI-O from first boot
+    # — avoids the stale-state mess of switching a running cluster's runtime.
+    - name: Install CRI-O runtime before K3s (container_runtime=crio)
+      include_role:
+        name: "{{ item }}"
+      loop:
+        - criu
+        - cri_o
+      when: (container_runtime | default('containerd')) == 'crio'
+
+    - name: Install K3s server
+      shell: |
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="{{ k3s_version }}" \
+          sh -s - server \
+          --cluster-init \
+          --cluster-cidr "{{ pod_cidr }}" \
+          --service-cidr "{{ service_cidr }}" \
+          --node-name "{{ inventory_hostname }}" \
+          --flannel-backend=none \
+          {{ ('--node-ip ' ~ node_ip ~ ' --advertise-address ' ~ node_ip ~ ' --tls-san ' ~ node_ip ~ ' ') if node_ip is defined else '' }}--disable-network-policy{{ ' --container-runtime-endpoint unix:///var/run/crio/crio.sock --image-service-endpoint unix:///var/run/crio/crio.sock' if (container_runtime | default('containerd')) == 'crio' else '' }}
+      timeout: 300
+      changed_when: true
+
+    - name: Wait for K3s kubeconfig to appear
+      wait_for:
+        path: /etc/rancher/k3s/k3s.yaml
+        timeout: 120
+        sleep: 5
+
+    - name: Set kubeconfig permissions
+      file:
+        path: /etc/rancher/k3s/k3s.yaml
+        mode: '0644'
+      ignore_errors: true
+
+    - name: Wait for K3s API server to be reachable
+      shell: kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes --no-headers 2>/dev/null
+      register: api_ready
+      until: api_ready.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+      failed_when: false
+
+    - name: Report K3s server status
+      debug:
+        msg: "K3s server installed on {{ inventory_hostname }} — API is ready"

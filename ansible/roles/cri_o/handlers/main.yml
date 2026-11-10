@@ -1,0 +1,5 @@
+---
+- name: restart crio
+  systemd:
+    name: crio
+    state: restarted
